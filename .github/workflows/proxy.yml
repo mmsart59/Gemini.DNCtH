@@ -1,1 +1,14 @@
+name: Binance Proxy
+on:
+  schedule:
+    - cron: '*/5 * * * *' # Runs every 5 mins to keep it alive
+  workflow_dispatch:
+
+jobs:
+  proxy:
+    runs-on: ubuntu-latest # GitHub runners are often non-US or rotated
+    steps:
+      - name: Test Connection
+        run: |
+          curl -H "User-Agent: Mozilla/5.0" "https://fapi.binance.com/fapi/v1/ticker/price?symbol=BTCUSDT"
 
