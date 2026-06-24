@@ -1,0 +1,12 @@
+{
+  "name": "ticker-station",
+  "version": "1.0.0",
+  "description": "Standalone Binance Ticker Service for Glass Price",
+  "main": "ticker.js",
+  "scripts": {
+    "start": "node ticker.js"
+  },
+  "dependencies": {
+    "ws": "^8.13.0"
+  }
+}
