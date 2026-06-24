@@ -4,13 +4,13 @@ const axios = require('axios');
 const urlParser = require('url');
 
 /**
- * TICKER STATION (June 2026)
+ * TICKER STATION (June 2026 - Optimized)
  * Standalone server for fast Binance Ticker updates + REST Proxy.
  * Frankfurt-based to bypass US geo-restrictions.
  */
 
 const port = process.env.PORT || 10001;
-const normalize = (s) => s.toUpperCase(); // NO STRIPPING - Keep USDT for app compatibility
+const normalize = (s) => s.toUpperCase();
 
 // --- HTTP SERVER (Keep Render Alive & Web View & REST Proxy) ---
 const server = http.createServer((req, res) => {
@@ -23,6 +23,7 @@ const server = http.createServer((req, res) => {
     }
 
     // --- KLINE PROXY (Bypass 403 on App) ---
+    // The app calls this to get RSI/Indicators safely
     if (parsedUrl.pathname === '/fapi/v1/klines') {
         const target = 'https://fapi.binance.com' + req.url;
         axios.get(target)
@@ -63,7 +64,14 @@ const server = http.createServer((req, res) => {
                 const s = document.getElementById('status');
                 const ws = new WebSocket(location.origin.replace('http', 'ws'));
 
-                ws.onopen = () => s.innerText = 'CONNECTED - RECEIVING LIVE PRICES';
+                ws.onopen = () => {
+                    s.innerText = 'CONNECTED - REQUESTING FEED';
+                    // Dashboard automatically subscribes to TOP coins for visual verification
+                    ws.send(JSON.stringify({
+                        op: 'subscribe_tickers',
+                        args: ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT', 'ADAUSDT', 'DOGEUSDT', 'TRXUSDT', 'DOTUSDT', 'MATICUSDT']
+                    }));
+                };
                 ws.onmessage = (e) => {
                     const j = JSON.parse(e.data);
                     if (j.type === 'tickers') {
@@ -88,21 +96,8 @@ const server = http.createServer((req, res) => {
 
 // --- WEBSOCKET SERVER (For App/Web) ---
 const wss = new WebSocket.Server({ server });
-let clients = new Set();
 let tickerCache = {};
 let engineActive = false;
-
-const broadcast = (payload) => {
-    const data = JSON.stringify(payload);
-    let sentCount = 0;
-    clients.forEach(c => {
-        if (c.readyState === WebSocket.OPEN) {
-            c.send(data);
-            sentCount++;
-        }
-    });
-    return sentCount;
-};
 
 // --- BINANCE TICKER ENGINE (2026 Routed Market) ---
 const startTickerEngine = () => {
@@ -114,7 +109,7 @@ const startTickerEngine = () => {
     const ws = new WebSocket(url);
 
     ws.on('open', () => {
-        console.log('>>> [TICKER STATION] Binance Stream Connected. Receiving live prices.');
+        console.log('>>> [TICKER STATION] Binance Stream Connected.');
         ws.pingTimer = setInterval(() => {
             if(ws.readyState === WebSocket.OPEN) ws.ping();
         }, 30000);
@@ -124,54 +119,56 @@ const startTickerEngine = () => {
         try {
             const arr = JSON.parse(data);
             if (!Array.isArray(arr)) return;
-
             arr.forEach(item => {
                 if (item.s.endsWith('USDT')) {
-                    tickerCache[normalize(item.s)] = {
-                        p: item.c,
-                        v: item.q,
-                        c: "0"
-                    };
+                    tickerCache[normalize(item.s)] = { p: item.c, v: item.q, c: "0" };
                 }
             });
-        } catch (e) {
-            console.error('[TICKER ERROR] Message parsing failed:', e.message);
-        }
+        } catch (e) {}
     });
 
     ws.on('close', () => {
-        console.log('--- [TICKER STATION] Connection lost. Reconnecting in 5s... ---');
+        console.log('--- [TICKER STATION] Connection lost. Reconnecting... ---');
         clearInterval(ws.pingTimer);
         engineActive = false;
         setTimeout(startTickerEngine, 5000);
     });
-
-    ws.on('error', (e) => console.error('[TICKER ERROR] Socket error:', e.message));
 };
 
 // --- CLIENT MANAGEMENT ---
 wss.on('connection', (ws) => {
-    clients.add(ws);
-    console.log(`[TICKER STATION] New Client Connected. Total Clients: ${clients.size}`);
+    ws.subscribedTickers = new Set();
+    console.log(`[TICKER STATION] New App Client connected.`);
 
-    if (Object.keys(tickerCache).length > 0) {
-        ws.send(JSON.stringify({ type: 'tickers', data: tickerCache }));
-    }
+    ws.on('message', (msg) => {
+        try {
+            const j = JSON.parse(msg);
+            if (j.op === 'subscribe_tickers') {
+                console.log(`[TICKER STATION] Client subscribed to: ${j.args.join(', ')}`);
+                j.args.forEach(s => ws.subscribedTickers.add(s.toUpperCase()));
+            }
+        } catch (e) {}
+    });
+
+    // Sub-loop: Send only what THIS client wants every 2 seconds
+    const sendTimer = setInterval(() => {
+        if (ws.readyState !== WebSocket.OPEN) return;
+
+        const filteredData = {};
+        ws.subscribedTickers.forEach(sym => {
+            if (tickerCache[sym]) filteredData[sym] = tickerCache[sym];
+        });
+
+        if (Object.keys(filteredData).length > 0) {
+            ws.send(JSON.stringify({ type: 'tickers', data: filteredData }));
+        }
+    }, 2000);
 
     ws.on('close', () => {
-        clients.delete(ws);
-        console.log(`[TICKER STATION] Client Disconnected. Remaining: ${clients.size}`);
+        clearInterval(sendTimer);
+        console.log(`[TICKER STATION] Client disconnected.`);
     });
 });
-
-// --- BROADCAST LOOP (Every 2 seconds) ---
-setInterval(() => {
-    const tickerCount = Object.keys(tickerCache).length;
-    if (clients.size > 0 && tickerCount > 0) {
-        const sentTo = broadcast({ type: 'tickers', data: tickerCache });
-        console.log(`[TICKER STATION] Broadcasted ${tickerCount} prices to ${sentTo} clients`);
-    }
-}, 2000);
 
 server.listen(port, () => {
     console.log(`Ticker Station LIVE on ${port}`);
