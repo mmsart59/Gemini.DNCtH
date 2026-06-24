@@ -1,20 +1,40 @@
 const WebSocket = require('ws');
 const http = require('http');
+const axios = require('axios');
+const urlParser = require('url');
 
 /**
  * TICKER STATION (June 2026)
- * Standalone server for fast Binance Ticker updates.
- * Separation ensures liquidation engine stability.
+ * Standalone server for fast Binance Ticker updates + REST Proxy.
+ * Frankfurt-based to bypass US geo-restrictions.
  */
 
 const port = process.env.PORT || 10001;
-const normalize = (s) => s.replace('USDT', '').toUpperCase();
+const normalize = (s) => s.toUpperCase(); // NO STRIPPING - Keep USDT for app compatibility
 
-// --- HTTP SERVER (Keep Render Alive & Web View) ---
+// --- HTTP SERVER (Keep Render Alive & Web View & REST Proxy) ---
 const server = http.createServer((req, res) => {
-    if (req.url === '/ping') {
+    const parsedUrl = urlParser.parse(req.url, true);
+
+    if (parsedUrl.pathname === '/ping') {
         res.writeHead(200, { 'Content-Type': 'text/plain', 'Access-Control-Allow-Origin': '*' });
         res.end('PONG');
+        return;
+    }
+
+    // --- KLINE PROXY (Bypass 403 on App) ---
+    if (parsedUrl.pathname === '/fapi/v1/klines') {
+        const target = 'https://fapi.binance.com' + req.url;
+        axios.get(target)
+            .then(response => {
+                res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+                res.end(JSON.stringify(response.data));
+            })
+            .catch(err => {
+                console.error('[PROXY ERROR] Kline fetch failed:', err.message);
+                res.writeHead(500);
+                res.end('Error fetching klines');
+            });
         return;
     }
 
@@ -24,18 +44,18 @@ const server = http.createServer((req, res) => {
         <!DOCTYPE html>
         <html>
         <head>
-            <title>TICKER STATION</title>
+            <title>TICKER STATION (FRANKFURT)</title>
             <style>
                 body { background: #000; color: #0f8; font-family: monospace; padding: 20px; }
-                .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
-                .item { background: #111; padding: 10px; border: 1px solid #222; border-radius: 4px; }
-                .val { font-weight: bold; font-size: 1.2em; color: #fff; }
-                .sym { color: #666; font-size: 0.8em; }
+                .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 10px; }
+                .item { background: #111; padding: 15px; border: 1px solid #222; border-radius: 6px; }
+                .val { font-weight: bold; font-size: 1.3em; color: #fff; margin-top: 5px; }
+                .sym { color: #888; font-size: 0.9em; letter-spacing: 1px; }
                 h1 { border-bottom: 1px solid #222; padding-bottom: 10px; color: #fff; }
             </style>
         </head>
         <body>
-            <h1>📡 TICKER STATION LIVE</h1>
+            <h1>📡 TICKER STATION LIVE (FRANKFURT)</h1>
             <div id="status">CONNECTING...</div>
             <div id="g" class="grid"></div>
             <script>
@@ -69,7 +89,7 @@ const server = http.createServer((req, res) => {
 // --- WEBSOCKET SERVER (For App/Web) ---
 const wss = new WebSocket.Server({ server });
 let clients = new Set();
-let tickerCache = {}; // Normalized cache: { BTC: { p, v, c } }
+let tickerCache = {};
 let engineActive = false;
 
 const broadcast = (payload) => {
@@ -108,9 +128,9 @@ const startTickerEngine = () => {
             arr.forEach(item => {
                 if (item.s.endsWith('USDT')) {
                     tickerCache[normalize(item.s)] = {
-                        p: item.c, // Last Price
-                        v: item.q, // 24h Volume (Quote)
-                        c: "0"     // Change
+                        p: item.c,
+                        v: item.q,
+                        c: "0"
                     };
                 }
             });
@@ -150,8 +170,6 @@ setInterval(() => {
     if (clients.size > 0 && tickerCount > 0) {
         const sentTo = broadcast({ type: 'tickers', data: tickerCache });
         console.log(`[TICKER STATION] Broadcasted ${tickerCount} prices to ${sentTo} clients`);
-    } else if (clients.size > 0 && tickerCount === 0) {
-        console.log('[TICKER STATION] Warning: Clients connected but no ticker data available from Binance');
     }
 }, 2000);
 
