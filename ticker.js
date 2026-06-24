@@ -23,18 +23,26 @@ const server = http.createServer((req, res) => {
     }
 
     // --- KLINE PROXY (Bypass 403 on App) ---
-    // The app calls this to get RSI/Indicators safely
     if (parsedUrl.pathname === '/fapi/v1/klines') {
         const target = 'https://fapi.binance.com' + req.url;
-        axios.get(target)
+
+        // Use Browser-like headers to prevent 418 bans
+        const headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'application/json',
+            'Cache-Control': 'no-cache'
+        };
+
+        axios.get(target, { headers, timeout: 5000 })
             .then(response => {
                 res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
                 res.end(JSON.stringify(response.data));
             })
             .catch(err => {
-                console.error('[PROXY ERROR] Kline fetch failed:', err.message);
-                res.writeHead(500);
-                res.end('Error fetching klines');
+                const status = err.response ? err.response.status : 500;
+                console.error(`[PROXY ERROR] Kline fetch failed (${status}):`, err.message);
+                res.writeHead(status);
+                res.end(`Error: ${err.message}`);
             });
         return;
     }
@@ -62,11 +70,13 @@ const server = http.createServer((req, res) => {
             <script>
                 const g = document.getElementById('g');
                 const s = document.getElementById('status');
-                const ws = new WebSocket(location.origin.replace('http', 'ws'));
+
+                // Robust WS connection logic for Render
+                const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+                const ws = new WebSocket(protocol + '//' + window.location.host);
 
                 ws.onopen = () => {
                     s.innerText = 'CONNECTED - REQUESTING FEED';
-                    // Dashboard automatically subscribes to TOP coins for visual verification
                     ws.send(JSON.stringify({
                         op: 'subscribe_tickers',
                         args: ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT', 'ADAUSDT', 'DOGEUSDT', 'TRXUSDT', 'DOTUSDT', 'MATICUSDT']
@@ -88,6 +98,7 @@ const server = http.createServer((req, res) => {
                     }
                 };
                 ws.onclose = () => s.innerText = 'DISCONNECTED';
+                ws.onerror = (e) => s.innerText = 'WS ERROR: ' + e.message;
             </script>
         </body>
         </html>
