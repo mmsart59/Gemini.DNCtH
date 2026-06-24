@@ -10,10 +10,60 @@ const http = require('http');
 const port = process.env.PORT || 10001;
 const normalize = (s) => s.replace('USDT', '').toUpperCase();
 
-// --- HTTP SERVER (Keep Render Alive) ---
+// --- HTTP SERVER (Keep Render Alive & Web View) ---
 const server = http.createServer((req, res) => {
-    res.writeHead(200, { 'Content-Type': 'text/plain' });
-    res.end('TICKER STATION LIVE');
+    if (req.url === '/ping') {
+        res.writeHead(200, { 'Content-Type': 'text/plain', 'Access-Control-Allow-Origin': '*' });
+        res.end('PONG');
+        return;
+    }
+
+    // Web Dashboard for verification
+    res.writeHead(200, { 'Content-Type': 'text/html' });
+    res.end(`
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>TICKER STATION</title>
+            <style>
+                body { background: #000; color: #0f8; font-family: monospace; padding: 20px; }
+                .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+                .item { background: #111; padding: 10px; border: 1px solid #222; border-radius: 4px; }
+                .val { font-weight: bold; font-size: 1.2em; color: #fff; }
+                .sym { color: #666; font-size: 0.8em; }
+                h1 { border-bottom: 1px solid #222; padding-bottom: 10px; color: #fff; }
+            </style>
+        </head>
+        <body>
+            <h1>📡 TICKER STATION LIVE</h1>
+            <div id="status">CONNECTING...</div>
+            <div id="g" class="grid"></div>
+            <script>
+                const g = document.getElementById('g');
+                const s = document.getElementById('status');
+                const ws = new WebSocket(location.origin.replace('http', 'ws'));
+
+                ws.onopen = () => s.innerText = 'CONNECTED - RECEIVING LIVE PRICES';
+                ws.onmessage = (e) => {
+                    const j = JSON.parse(e.data);
+                    if (j.type === 'tickers') {
+                        Object.keys(j.data).forEach(sym => {
+                            let el = document.getElementById('s_' + sym);
+                            if (!el) {
+                                el = document.createElement('div');
+                                el.id = 's_' + sym;
+                                el.className = 'item';
+                                g.appendChild(el);
+                            }
+                            el.innerHTML = '<div class="sym">' + sym + '</div><div class="val">$' + parseFloat(j.data[sym].p).toLocaleString() + '</div>';
+                        });
+                    }
+                };
+                ws.onclose = () => s.innerText = 'DISCONNECTED';
+            </script>
+        </body>
+        </html>
+    `);
 });
 
 // --- WEBSOCKET SERVER (For App/Web) ---
@@ -60,7 +110,7 @@ const startTickerEngine = () => {
                     tickerCache[normalize(item.s)] = {
                         p: item.c, // Last Price
                         v: item.q, // 24h Volume (Quote)
-                        c: "0"     // Change (MiniTicker doesn't have percent change)
+                        c: "0"     // Change
                     };
                 }
             });
