@@ -4,15 +4,34 @@ const axios = require('axios');
 const urlParser = require('url');
 
 /**
- * TICKER STATION (June 2026 - Optimized)
- * Standalone server for fast Binance Ticker updates + REST Proxy.
+ * TICKER STATION (June 2026 - Data Complete)
+ * Standalone server for fast Binance Ticker updates + Full REST Proxy.
  * Frankfurt-based to bypass US geo-restrictions.
  */
 
 const port = process.env.PORT || 10001;
 const normalize = (s) => s.toUpperCase();
 
-// --- HTTP SERVER (Keep Render Alive & Web View & REST Proxy) ---
+// The specific 100 coins available in the app to reduce server load
+const APP_COINS = new Set([
+    "BTCUSDT", "ETHUSDT", "DOTUSDT", "HBARUSDT", "XRPUSDT", "LINKUSDT", "ARBUSDT",
+    "BNBUSDT", "SOLUSDT", "ADAUSDT", "DOGEUSDT", "TRXUSDT", "AVAXUSDT", "MATICUSDT",
+    "SHIBUSDT", "LTCUSDT", "UNIUSDT", "BCHUSDT", "ICPUSDT", "ETCUSDT", "NEARUSDT",
+    "ATOMUSDT", "OPUSDT", "XLMUSDT", "FILUSDT", "INJUSDT", "IMXUSDT", "APTUSDT",
+    "CROUSDT", "LDOUSDT", "VETUSDT", "MKRUSDT", "GRTUSDT", "RNDRUSDT", "SUIUSDT",
+    "AAVEUSDT", "ALGOUSDT", "EGLDUSDT", "AXSUSDT", "SANDUSDT", "MANAUSDT", "FTMUSDT",
+    "THETAUSDT", "XTZUSDT", "SNXUSDT", "NEOUSDT", "FLOWUSDT", "KAVAUSDT", "MINAUSDT",
+    "GALAUSDT", "APEUSDT", "DYDXUSDT", "LUNA2USDT", "EOSUSDT", "TWTUSDT", "ZILUSDT",
+    "CRVUSDT", "GMTUSDT", "1INCHUSDT", "COMPUSDT", "STXUSDT", "XMRUSDT", "RUNEUSDT",
+    "KLAYUSDT", "ARUSDT", "FETUSDT", "PAXGUSDT", "WLDUSDT", "WAVESUSDT", "ZECUSDT",
+    "CAKEUSDT", "SEIUSDT", "GMXUSDT", "FXSUSDT", "DASHUSDT", "ENSUSDT", "PEPEUSDT",
+    "CFXUSDT", "MASKUSDT", "ROSEUSDT", "LRCUSDT", "CVXUSDT", "WOOUSDT", "CELOUSDT",
+    "IOTXUSDT", "FLOKIUSDT", "AGIXUSDT", "KSMUSDT", "CHZUSDT", "OCEANUSDT", "SUSHIUSDT",
+    "BATUSDT", "BANDUSDT", "QTUMUSDT", "ANKRUSDT", "IOTAUSDT", "ENJUSDT", "YFIUSDT",
+    "ONEUSDT", "STORJUSDT"
+]);
+
+// --- HTTP SERVER (Keep Render Alive & Web View & Full REST Proxy) ---
 const server = http.createServer((req, res) => {
     const parsedUrl = urlParser.parse(req.url, true);
 
@@ -22,8 +41,9 @@ const server = http.createServer((req, res) => {
         return;
     }
 
-    // --- KLINE PROXY (Bypass 403 on App) ---
-    if (parsedUrl.pathname === '/fapi/v1/klines') {
+    // --- FULL BINANCE PROXY (Bypass 403 on App) ---
+    // Handles /fapi/v1/klines, /fapi/v1/premiumIndex, /fapi/v1/openInterest
+    if (parsedUrl.pathname.startsWith('/fapi/v1/')) {
         const target = 'https://fapi.binance.com' + req.url;
         const headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -31,14 +51,14 @@ const server = http.createServer((req, res) => {
             'Cache-Control': 'no-cache'
         };
 
-        axios.get(target, { headers, timeout: 5000 })
+        axios.get(target, { headers, timeout: 8000 })
             .then(response => {
                 res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
                 res.end(JSON.stringify(response.data));
             })
             .catch(err => {
                 const status = err.response ? err.response.status : 500;
-                console.error(`[PROXY ERROR] Kline fetch failed (${status}):`, err.message);
+                console.error(`[PROXY ERROR] ${parsedUrl.pathname} failed (${status}):`, err.message);
                 res.writeHead(status);
                 res.end(`Error: ${err.message}`);
             });
@@ -107,7 +127,7 @@ const wss = new WebSocket.Server({ server });
 let tickerCache = {};
 let engineActive = false;
 
-// --- BINANCE TICKER ENGINE (Subscribes to EVERYTHING) ---
+// --- BINANCE TICKER ENGINE ---
 const startTickerEngine = () => {
     if (engineActive) return;
     engineActive = true;
@@ -117,7 +137,7 @@ const startTickerEngine = () => {
     const ws = new WebSocket(url);
 
     ws.on('open', () => {
-        console.log('>>> [TICKER STATION] Binance Stream Connected. Caching all market data.');
+        console.log('>>> [TICKER STATION] Binance Stream Connected. Caching App Coins.');
         ws.pingTimer = setInterval(() => {
             if(ws.readyState === WebSocket.OPEN) ws.ping();
         }, 30000);
@@ -128,8 +148,10 @@ const startTickerEngine = () => {
             const arr = JSON.parse(data);
             if (!Array.isArray(arr)) return;
             arr.forEach(item => {
-                if (item.s.endsWith('USDT')) {
-                    tickerCache[normalize(item.s)] = { p: item.c, v: item.q, c: "0" };
+                const sym = normalize(item.s);
+                // Only cache the 100 coins used by the app to keep memory clean
+                if (APP_COINS.has(sym)) {
+                    tickerCache[sym] = { p: item.c, v: item.q, c: "0" };
                 }
             });
         } catch (e) {}
@@ -152,13 +174,12 @@ wss.on('connection', (ws) => {
         try {
             const j = JSON.parse(msg);
             if (j.op === 'subscribe_tickers') {
-                console.log(`[TICKER STATION] App requested: ${j.args.length} coins`);
                 j.args.forEach(s => ws.subscribedTickers.add(s.toUpperCase()));
             }
         } catch (e) {}
     });
 
-    // BROADCAST LOOP: 10 Seconds (As requested to reduce noise)
+    // BROADCAST LOOP: 10 Seconds
     const sendTimer = setInterval(() => {
         if (ws.readyState !== WebSocket.OPEN) return;
 
