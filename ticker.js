@@ -25,8 +25,6 @@ const server = http.createServer((req, res) => {
     // --- KLINE PROXY (Bypass 403 on App) ---
     if (parsedUrl.pathname === '/fapi/v1/klines') {
         const target = 'https://fapi.binance.com' + req.url;
-
-        // Use Browser-like headers to prevent 418 bans
         const headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Accept': 'application/json',
@@ -71,7 +69,6 @@ const server = http.createServer((req, res) => {
                 const g = document.getElementById('g');
                 const s = document.getElementById('status');
 
-                // Robust WS connection logic for Render
                 const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
                 const ws = new WebSocket(protocol + '//' + window.location.host);
 
@@ -110,17 +107,17 @@ const wss = new WebSocket.Server({ server });
 let tickerCache = {};
 let engineActive = false;
 
-// --- BINANCE TICKER ENGINE (2026 Routed Market) ---
+// --- BINANCE TICKER ENGINE (Subscribes to EVERYTHING) ---
 const startTickerEngine = () => {
     if (engineActive) return;
     engineActive = true;
 
-    console.log('>>> [TICKER STATION] Connecting to Binance Market Stream...');
+    console.log('>>> [TICKER STATION] Connecting to Binance Market Stream (Global)...');
     const url = 'wss://fstream.binance.com/market/ws/!miniTicker@arr';
     const ws = new WebSocket(url);
 
     ws.on('open', () => {
-        console.log('>>> [TICKER STATION] Binance Stream Connected.');
+        console.log('>>> [TICKER STATION] Binance Stream Connected. Caching all market data.');
         ws.pingTimer = setInterval(() => {
             if(ws.readyState === WebSocket.OPEN) ws.ping();
         }, 30000);
@@ -139,29 +136,29 @@ const startTickerEngine = () => {
     });
 
     ws.on('close', () => {
-        console.log('--- [TICKER STATION] Connection lost. Reconnecting... ---');
+        console.log('--- [TICKER STATION] Binance Lost. Reconnecting... ---');
         clearInterval(ws.pingTimer);
         engineActive = false;
         setTimeout(startTickerEngine, 5000);
     });
 };
 
-// --- CLIENT MANAGEMENT ---
+// --- CLIENT MANAGEMENT (Smart On-Demand Subscriptions) ---
 wss.on('connection', (ws) => {
     ws.subscribedTickers = new Set();
-    console.log(`[TICKER STATION] New App Client connected.`);
+    console.log(`[TICKER STATION] New Client Connected.`);
 
     ws.on('message', (msg) => {
         try {
             const j = JSON.parse(msg);
             if (j.op === 'subscribe_tickers') {
-                console.log(`[TICKER STATION] Client subscribed to: ${j.args.join(', ')}`);
+                console.log(`[TICKER STATION] App requested: ${j.args.length} coins`);
                 j.args.forEach(s => ws.subscribedTickers.add(s.toUpperCase()));
             }
         } catch (e) {}
     });
 
-    // Sub-loop: Send only what THIS client wants every 2 seconds
+    // BROADCAST LOOP: 10 Seconds (As requested to reduce noise)
     const sendTimer = setInterval(() => {
         if (ws.readyState !== WebSocket.OPEN) return;
 
@@ -173,7 +170,7 @@ wss.on('connection', (ws) => {
         if (Object.keys(filteredData).length > 0) {
             ws.send(JSON.stringify({ type: 'tickers', data: filteredData }));
         }
-    }, 2000);
+    }, 10000);
 
     ws.on('close', () => {
         clearInterval(sendTimer);
