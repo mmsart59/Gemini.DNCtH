@@ -4,8 +4,8 @@ const axios = require('axios');
 const urlParser = require('url');
 
 /**
- * TICKER STATION (June 2026 - Data Complete)
- * Standalone server for fast Binance Ticker updates + Full REST Proxy.
+ * TICKER STATION (June 2026 - Optimized)
+ * Standalone server for fast Binance Ticker updates + REST Proxy.
  * Frankfurt-based to bypass US geo-restrictions.
  */
 
@@ -31,7 +31,7 @@ const APP_COINS = new Set([
     "ONEUSDT", "STORJUSDT"
 ]);
 
-// --- HTTP SERVER (Keep Render Alive & Web View & Full REST Proxy) ---
+// --- HTTP SERVER (Keep Render Alive & Web View & REST Proxy) ---
 const server = http.createServer((req, res) => {
     const parsedUrl = urlParser.parse(req.url, true);
 
@@ -42,7 +42,6 @@ const server = http.createServer((req, res) => {
     }
 
     // --- FULL BINANCE PROXY (Bypass 403 on App) ---
-    // Handles /fapi/v1/klines, /fapi/v1/premiumIndex, /fapi/v1/openInterest
     if (parsedUrl.pathname.startsWith('/fapi/v1/')) {
         const target = 'https://fapi.binance.com' + req.url;
         const headers = {
@@ -73,18 +72,23 @@ const server = http.createServer((req, res) => {
         <head>
             <title>TICKER STATION (FRANKFURT)</title>
             <style>
-                body { background: #000; color: #0f8; font-family: monospace; padding: 20px; }
-                .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 10px; }
-                .item { background: #111; padding: 15px; border: 1px solid #222; border-radius: 6px; }
-                .val { font-weight: bold; font-size: 1.3em; color: #fff; margin-top: 5px; }
-                .sym { color: #888; font-size: 0.9em; letter-spacing: 1px; }
-                h1 { border-bottom: 1px solid #222; padding-bottom: 10px; color: #fff; }
+                body { background: #000; color: #fff; font-family: 'JetBrains Mono', monospace; padding: 20px; }
+                .container { background: rgba(20,20,20,0.7); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); border: 1px solid rgba(255,255,255,0.1); border-radius: 12px; padding: 20px; box-shadow: 0 8px 32px rgba(0,0,0,0.5); }
+                .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; }
+                .item { background: rgba(255,255,255,0.03); padding: 15px; border: 1px solid rgba(255,255,255,0.05); border-radius: 8px; transition: all 0.3s ease; }
+                .item:hover { background: rgba(255,255,255,0.07); border-color: rgba(255,255,255,0.1); transform: translateY(-2px); }
+                .val { font-weight: 800; font-size: 1.3em; color: #fff; margin-top: 5px; }
+                .sym { color: #666; font-size: 0.9em; letter-spacing: 1px; font-weight: bold; }
+                h1 { font-weight: 800; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 15px; margin-top: 0; display: flex; justify-content: space-between; align-items: center; }
+                #status { font-size: 10px; color: #45F7B9; text-transform: uppercase; letter-spacing: 2px; margin-bottom: 20px; }
             </style>
         </head>
         <body>
-            <h1>📡 TICKER STATION LIVE (FRANKFURT)</h1>
-            <div id="status">CONNECTING...</div>
-            <div id="g" class="grid"></div>
+            <div class="container">
+                <h1>📡 TICKER STATION <span style="font-size: 10px; color: #444;">V2.0 PRO</span></h1>
+                <div id="status">INITIALIZING...</div>
+                <div id="g" class="grid"></div>
+            </div>
             <script>
                 const g = document.getElementById('g');
                 const s = document.getElementById('status');
@@ -93,7 +97,7 @@ const server = http.createServer((req, res) => {
                 const ws = new WebSocket(protocol + '//' + window.location.host);
 
                 ws.onopen = () => {
-                    s.innerText = 'CONNECTED - REQUESTING FEED';
+                    s.innerText = 'CONNECTED - ENCRYPTED TUNNEL ACTIVE';
                     ws.send(JSON.stringify({
                         op: 'subscribe_tickers',
                         args: ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT', 'ADAUSDT', 'DOGEUSDT', 'TRXUSDT', 'DOTUSDT', 'MATICUSDT']
@@ -114,8 +118,7 @@ const server = http.createServer((req, res) => {
                         });
                     }
                 };
-                ws.onclose = () => s.innerText = 'DISCONNECTED';
-                ws.onerror = (e) => s.innerText = 'WS ERROR: ' + e.message;
+                ws.onclose = () => { s.innerText = 'DISCONNECTED'; s.style.color = '#F83A7A'; };
             </script>
         </body>
         </html>
@@ -149,7 +152,6 @@ const startTickerEngine = () => {
             if (!Array.isArray(arr)) return;
             arr.forEach(item => {
                 const sym = normalize(item.s);
-                // Only cache the 100 coins used by the app to keep memory clean
                 if (APP_COINS.has(sym)) {
                     tickerCache[sym] = { p: item.c, v: item.q, c: "0" };
                 }
@@ -174,6 +176,7 @@ wss.on('connection', (ws) => {
         try {
             const j = JSON.parse(msg);
             if (j.op === 'subscribe_tickers') {
+                console.log(`[TICKER STATION] App requested: ${j.args.length} coins`);
                 j.args.forEach(s => ws.subscribedTickers.add(s.toUpperCase()));
             }
         } catch (e) {}
