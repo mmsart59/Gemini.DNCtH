@@ -175,14 +175,19 @@ const startTickerEngine = () => {
     engineActive = true;
 
     console.log('>>> [TICKER STATION] Connecting to Binance Market Stream (Global)...');
-    const url = 'wss://fstream.binance.com/market/ws/!miniTicker@arr';
+
+    // Switch to !ticker@arr for 24h change % + individual streams for Funding/OI
+    const url = 'wss://fstream.binance.com/ws/!ticker@arr';
     const ws = new WebSocket(url);
 
     ws.on('open', () => {
-        console.log('>>> [TICKER STATION] Binance Stream Connected. Caching App Coins.');
+        console.log('>>> [TICKER STATION] Binance Ticker Connected.');
         ws.pingTimer = setInterval(() => {
             if(ws.readyState === WebSocket.OPEN) ws.ping();
         }, 30000);
+
+        // Subscribe to Mark Price (Funding) and Open Interest for top coins
+        startIndicatorEngine();
     });
 
     ws.on('message', (data) => {
@@ -192,15 +197,11 @@ const startTickerEngine = () => {
             arr.forEach(item => {
                 const sym = normalize(item.s);
                 if (APP_COINS.has(sym)) {
-                    // Cache price, volume, and extract funding/OI if available from the stream
-                    // Note: miniTicker only gives price/volume.
-                    // To keep ticker.js simple and REST-free, we'll let the app handle
-                    // specific indicator streams, or upgrade this to @ticker for more data.
                     tickerCache[sym] = {
-                        p: item.c,
-                        v: item.q,
-                        c: "0",
-                        r: tickerCache[sym]?.r || 0, // Preserve existing funding/OI if any
+                        p: item.c, // Last Price
+                        v: item.q, // Quote Volume
+                        c: item.P, // 24h Price Change Percent
+                        r: tickerCache[sym]?.r || 0, // Preserved from Indicator Engine
                         o: tickerCache[sym]?.o || 0
                     };
                 }
@@ -209,11 +210,46 @@ const startTickerEngine = () => {
     });
 
     ws.on('close', () => {
-        console.log('--- [TICKER STATION] Binance Lost. Reconnecting... ---');
+        console.log('--- [TICKER STATION] Ticker Lost. Reconnecting... ---');
         clearInterval(ws.pingTimer);
         engineActive = false;
         setTimeout(startTickerEngine, 5000);
     });
+};
+
+const startIndicatorEngine = () => {
+    const symbols = Array.from(APP_COINS);
+    const CHUNK_SIZE = 20;
+    for (let i = 0; i < symbols.length; i += CHUNK_SIZE) {
+        const chunk = symbols.slice(i, i + CHUNK_SIZE);
+        const chunkStreams = [];
+        chunk.forEach(s => {
+            chunkStreams.push(`${s.toLowerCase()}@markPrice`);
+            chunkStreams.push(`${s.toLowerCase()}@openInterest`);
+        });
+
+        const url = `wss://fstream.binance.com/stream?streams=${chunkStreams.join('/')}`;
+        const ws = new WebSocket(url);
+
+        ws.on('message', (data) => {
+            try {
+                const msg = JSON.parse(data);
+                if (!msg.data) return;
+                const sym = normalize(msg.data.s);
+                if (msg.data.e === 'markPriceUpdate') {
+                    if (!tickerCache[sym]) tickerCache[sym] = { p: "0", v: "0", c: "0", r: 0, o: 0 };
+                    tickerCache[sym].r = parseFloat(msg.data.r);
+                } else if (msg.data.e === 'openInterestUpdate') {
+                    if (!tickerCache[sym]) tickerCache[sym] = { p: "0", v: "0", c: "0", r: 0, o: 0 };
+                    tickerCache[sym].o = parseFloat(msg.data.o);
+                }
+            } catch (e) {}
+        });
+
+        ws.on('close', () => {
+            setTimeout(startIndicatorEngine, 10000);
+        });
+    }
 };
 
 // --- CLIENT MANAGEMENT (Smart On-Demand Subscriptions) ---
