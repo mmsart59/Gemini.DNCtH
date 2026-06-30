@@ -91,17 +91,20 @@ const startTickerEngine = () => {
 
     ws.on('message', (data) => {
         try {
-            const arr = JSON.parse(data);
+            const msgStr = data.toString();
+            const arr = JSON.parse(msgStr);
             if (!Array.isArray(arr)) return;
             arr.forEach(item => {
                 const sym = normalize(item.s);
                 if (APP_COINS.has(sym)) {
                     if (!tickerCache[sym]) {
-                        tickerCache[sym] = { p: "0", v: "0", c: "0", r: 0, o: 0 };
+                        tickerCache[sym] = { p: "0", v: "0", c: "0", h: "0", l: "0", r: 0, o: 0 };
                     }
                     tickerCache[sym].p = item.c; // Last Price
                     tickerCache[sym].v = item.q; // Quote Volume
                     tickerCache[sym].c = item.P; // 24h Price Change Percent
+                    tickerCache[sym].h = item.h; // 24h High
+                    tickerCache[sym].l = item.l; // 24h Low
                 }
             });
         } catch (e) {}
@@ -131,10 +134,11 @@ const startIndicatorEngine = () => {
 
         ws.on('message', (data) => {
             try {
-                const msg = JSON.parse(data);
+                const msgStr = data.toString();
+                const msg = JSON.parse(msgStr);
                 if (!msg.data) return;
                 const sym = normalize(msg.data.s);
-                if (!tickerCache[sym]) tickerCache[sym] = { p: "0", v: "0", c: "0", r: 0, o: 0 };
+                if (!tickerCache[sym]) tickerCache[sym] = { p: "0", v: "0", c: "0", h: "0", l: "0", r: 0, o: 0 };
 
                 if (msg.data.e === 'markPriceUpdate') {
                     tickerCache[sym].r = parseFloat(msg.data.r); // Funding Rate
@@ -157,7 +161,8 @@ wss.on('connection', (ws) => {
 
     ws.on('message', (msg) => {
         try {
-            const j = JSON.parse(msg);
+            const msgStr = msg.toString();
+            const j = JSON.parse(msgStr);
             if (j.op === 'subscribe_tickers') {
                 j.args.forEach(s => ws.subscribedTickers.add(s.toUpperCase()));
             }
