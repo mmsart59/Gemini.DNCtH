@@ -45,25 +45,40 @@ const server = http.createServer((req, res) => {
     // Handle both direct paths and paths prefixed with /ticker/ from the Cloudflare Worker
     const cleanPath = parsedUrl.pathname.replace(/^\/ticker/, '');
 
-    if (cleanPath.startsWith('/fapi/v1/')) {
+    // More robust matching for Binance API paths
+    if (cleanPath.includes('/fapi/v1/') || cleanPath.includes('/api/v3/') || cleanPath.includes('/fapi/v2/')) {
         // Use req.url to get the query parameters, but remove the /ticker prefix if present
-        const target = 'https://fapi.binance.com' + req.url.replace(/^\/ticker/, '');
+        // We use req.url directly to preserve the full query string exactly as it came in
+        const target = 'https://fapi.binance.com' + req.url.replace(/^\/ticker/, '').replace('//', '/');
+
+        console.log(`[PROXY] ${req.method} ${req.url} -> ${target}`);
+
         const headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Accept': 'application/json',
             'Cache-Control': 'no-cache'
         };
 
-        axios.get(target, { headers, timeout: 8000 })
+        axios({
+            method: req.method,
+            url: target,
+            headers: headers,
+            timeout: 10000
+        })
             .then(response => {
-                res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+                res.writeHead(200, {
+                    'Content-Type': 'application/json',
+                    'Access-Control-Allow-Origin': '*',
+                    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+                    'Access-Control-Allow-Headers': 'Content-Type'
+                });
                 res.end(JSON.stringify(response.data));
             })
             .catch(err => {
                 const status = err.response ? err.response.status : 500;
                 console.error(`[PROXY ERROR] ${cleanPath} failed (${status}):`, err.message);
-                res.writeHead(status, { 'Access-Control-Allow-Origin': '*' });
-                res.end(`Error: ${err.message}`);
+                res.writeHead(status, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+                res.end(JSON.stringify({ error: err.message, path: cleanPath }));
             });
         return;
     }
