@@ -197,13 +197,15 @@ const startTickerEngine = () => {
             arr.forEach(item => {
                 const sym = normalize(item.s);
                 if (APP_COINS.has(sym)) {
-                    tickerCache[sym] = {
-                        p: item.c, // Last Price
-                        v: item.q, // Quote Volume
-                        c: item.P, // 24h Price Change Percent
-                        r: tickerCache[sym]?.r || 0, // Preserved from Indicator Engine
-                        o: tickerCache[sym]?.o || 0
-                    };
+                    // Initialize if not exists
+                    if (!tickerCache[sym]) {
+                        tickerCache[sym] = { p: "0", v: "0", c: "0", r: 0, o: 0 };
+                    }
+
+                    // Update ticker data while PRESERVING indicator data (r and o)
+                    tickerCache[sym].p = item.c; // Last Price
+                    tickerCache[sym].v = item.q; // Quote Volume
+                    tickerCache[sym].c = item.P; // 24h Price Change Percent
                 }
             });
         } catch (e) {}
