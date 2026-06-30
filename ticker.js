@@ -1,5 +1,6 @@
 const WebSocket = require('ws');
 const http = require('http');
+const https = require('https');
 const axios = require('axios');
 const urlParser = require('url');
 
@@ -11,6 +12,12 @@ const urlParser = require('url');
 
 const port = process.env.PORT || 10001;
 const normalize = (s) => s.toUpperCase();
+
+// --- HTTPS AGENT (Fix for SSL "unable to get local issuer certificate") ---
+const httpsAgent = new https.Agent({
+    rejectUnauthorized: false,
+    keepAlive: true
+});
 
 // The specific 100 coins available in the app to reduce server load
 const APP_COINS = new Set([
@@ -110,7 +117,11 @@ const server = http.createServer((req, res) => {
                         'Cache-Control': 'no-cache'
                     };
 
-                    const response = await axios.get(target, { headers, timeout: 8000 });
+                    const response = await axios.get(target, {
+                        headers,
+                        timeout: 8000,
+                        httpsAgent: httpsAgent
+                    });
                     const data = JSON.stringify(response.data);
 
                     proxyCache.set(cacheKey, { data, timestamp: Date.now() });
