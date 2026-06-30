@@ -247,7 +247,7 @@ const startIndicatorEngine = () => {
         });
 
         ws.on('close', () => {
-            setTimeout(startIndicatorEngine, 10000);
+            // No auto-reconnect here to save resources; let startTickerEngine re-trigger
         });
     }
 };
