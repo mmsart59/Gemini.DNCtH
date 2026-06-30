@@ -47,18 +47,25 @@ const server = http.createServer((req, res) => {
         const fapiIndex = req.url.indexOf('/fapi/');
         const path = fapiIndex !== -1 ? req.url.substring(fapiIndex) : req.url;
 
-        // Try multiple Binance mirrors in order until one works
+        // Comprehensive list of Binance Futures mirrors for high availability
         const binanceMirrors = [
+            'https://fapi.binance.com',
             'https://fapi.binance.me',
             'https://fapi.binance.info',
-            'https://fapi.binance.com',
-            'https://fapi.binancezh.me'
+            'https://fapi.binancezh.me',
+            'https://fapi1.binance.com',
+            'https://fapi2.binance.com',
+            'https://fapi3.binance.com'
         ];
 
         const tryProxy = (index) => {
             if (index >= binanceMirrors.length) {
-                res.writeHead(502);
-                res.end('Error: All Binance mirrors failed from Proxy.');
+                res.writeHead(502, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+                res.end(JSON.stringify({
+                    error: 'All Binance mirrors failed',
+                    status: 502,
+                    path: path
+                }));
                 return;
             }
 
@@ -68,17 +75,27 @@ const server = http.createServer((req, res) => {
             axios.get(target, {
                 headers: {
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                    'Accept': 'application/json'
+                    'Accept': 'application/json',
+                    'Cache-Control': 'no-cache'
                 },
-                timeout: 8000
+                timeout: 10000 // Slightly longer timeout for deep mirror attempts
             })
             .then(response => {
                 res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
                 res.end(JSON.stringify(response.data));
             })
             .catch(err => {
-                console.warn(`[PROXY FAILED] Mirror ${binanceMirrors[index]} failed: ${err.message}`);
-                tryProxy(index + 1);
+                const status = err.response ? err.response.status : 500;
+                console.warn(`[PROXY FAILED] Mirror ${binanceMirrors[index]} failed with ${status}: ${err.message}`);
+
+                // If it's a 403, 418, 429 or 451 (Geo), try the next mirror immediately
+                if ([403, 418, 429, 451, 500, 502, 503, 504].includes(status)) {
+                    tryProxy(index + 1);
+                } else {
+                    // For other errors (like 400 Bad Request), return the error JSON
+                    res.writeHead(status, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+                    res.end(JSON.stringify({ error: err.message, status }));
+                }
             });
         };
 
