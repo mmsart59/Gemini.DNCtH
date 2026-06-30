@@ -42,8 +42,12 @@ const server = http.createServer((req, res) => {
     }
 
     // --- FULL BINANCE PROXY (Bypass 403 on App) ---
-    if (parsedUrl.pathname.startsWith('/fapi/v1/')) {
-        const target = 'https://fapi.binance.com' + req.url;
+    // Handle both direct paths and paths prefixed with /ticker/ from the Cloudflare Worker
+    const cleanPath = parsedUrl.pathname.replace(/^\/ticker/, '');
+
+    if (cleanPath.startsWith('/fapi/v1/')) {
+        // Use req.url to get the query parameters, but remove the /ticker prefix if present
+        const target = 'https://fapi.binance.com' + req.url.replace(/^\/ticker/, '');
         const headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Accept': 'application/json',
@@ -57,8 +61,8 @@ const server = http.createServer((req, res) => {
             })
             .catch(err => {
                 const status = err.response ? err.response.status : 500;
-                console.error(`[PROXY ERROR] ${parsedUrl.pathname} failed (${status}):`, err.message);
-                res.writeHead(status);
+                console.error(`[PROXY ERROR] ${cleanPath} failed (${status}):`, err.message);
+                res.writeHead(status, { 'Access-Control-Allow-Origin': '*' });
                 res.end(`Error: ${err.message}`);
             });
         return;
@@ -114,7 +118,19 @@ const server = http.createServer((req, res) => {
                                 el.className = 'item';
                                 g.appendChild(el);
                             }
-                            el.innerHTML = '<div class="sym">' + sym + '</div><div class="val">$' + parseFloat(j.data[sym].p).toLocaleString() + '</div>';
+                            const ticker = j.data[sym];
+                            const price = parseFloat(ticker.p).toLocaleString();
+                            const change = parseFloat(ticker.c);
+                            const changeColor = change > 0 ? '#45F7B9' : (change < 0 ? '#F83A7A' : '#fff');
+                            const changeSign = change > 0 ? '+' : '';
+
+                            el.innerHTML = \`
+                                <div class="sym">\${sym}</div>
+                                <div class="val">$\${price}</div>
+                                <div style="color: \${changeColor}; font-size: 0.8em; margin-top: 5px; font-weight: bold;">
+                                    \${changeSign}\${change}%
+                                </div>
+                            \`;
                         });
                     }
                 };
@@ -153,7 +169,13 @@ const startTickerEngine = () => {
             arr.forEach(item => {
                 const sym = normalize(item.s);
                 if (APP_COINS.has(sym)) {
-                    tickerCache[sym] = { p: item.c, v: item.q, c: "0" };
+                    // Calculate 24h Change Percentage
+                    // c = close (current price), o = open (24h ago)
+                    const price = parseFloat(item.c);
+                    const open = parseFloat(item.o);
+                    const change = open > 0 ? ((price - open) / open * 100).toFixed(2) : "0.00";
+
+                    tickerCache[sym] = { p: item.c, v: item.q, c: change };
                 }
             });
         } catch (e) {}
@@ -181,12 +203,7 @@ wss.on('connection', (ws) => {
         try {
             const j = JSON.parse(msg);
             if (j.op === 'subscribe_tickers') {
-                // REPLACE the set with new arguments (allows clearing with empty list)
-                ws.subscribedTickers.clear();
-                if (Array.isArray(j.args)) {
-                    j.args.forEach(s => ws.subscribedTickers.add(s.toUpperCase()));
-                    console.log(`[TICKER STATION] Client updated subscriptions: ${j.args.length} coins`);
-                }
+                j.args.forEach(s => ws.subscribedTickers.add(s.toUpperCase()));
             }
         } catch (e) {}
     });
@@ -197,7 +214,7 @@ wss.on('connection', (ws) => {
     });
 });
 
-// SINGLE GLOBAL BROADCAST LOOP: 10 Seconds
+// SINGLE GLOBAL BROADCAST LOOP: 1 Second (Optimized for 2026 responsiveness)
 setInterval(() => {
     if (clients.size === 0) return;
 
@@ -213,6 +230,7 @@ setInterval(() => {
                 const lastPrice = ws.lastSentPrices[sym];
 
                 // Only send if price changed or first time
+                // Using a 1s loop ensures high responsiveness for traders
                 if (!lastPrice || lastPrice !== current.p) {
                     filteredData[sym] = current;
                     ws.lastSentPrices[sym] = current.p;
@@ -225,7 +243,7 @@ setInterval(() => {
             ws.send(JSON.stringify({ type: 'tickers', data: filteredData }));
         }
     });
-}, 10000);
+}, 1000);
 
 server.listen(port, () => {
     console.log(`Ticker Station LIVE on ${port}`);
