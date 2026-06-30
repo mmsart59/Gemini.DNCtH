@@ -181,12 +181,7 @@ wss.on('connection', (ws) => {
         try {
             const j = JSON.parse(msg);
             if (j.op === 'subscribe_tickers') {
-                // REPLACE the set with new arguments (allows clearing with empty list)
-                ws.subscribedTickers.clear();
-                if (Array.isArray(j.args)) {
-                    j.args.forEach(s => ws.subscribedTickers.add(s.toUpperCase()));
-                    console.log(`[TICKER STATION] Client updated subscriptions: ${j.args.length} coins`);
-                }
+                j.args.forEach(s => ws.subscribedTickers.add(s.toUpperCase()));
             }
         } catch (e) {}
     });
