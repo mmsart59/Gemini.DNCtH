@@ -34,10 +34,55 @@ const APP_COINS = new Set([
 // --- HTTP SERVER (Keep Render Alive & Web View & REST Proxy) ---
 const server = http.createServer((req, res) => {
     const parsedUrl = urlParser.parse(req.url, true);
+    console.log(`[REQUEST] ${req.method} ${req.url}`);
 
     if (parsedUrl.pathname === '/ping') {
         res.writeHead(200, { 'Content-Type': 'text/plain', 'Access-Control-Allow-Origin': '*' });
         res.end('PONG');
+        return;
+    }
+
+    // --- CATCH-ALL PROXY FOR BINANCE ---
+    if (parsedUrl.pathname.includes('/fapi/') || parsedUrl.pathname.includes('/klines')) {
+        const fapiIndex = req.url.indexOf('/fapi/');
+        const path = fapiIndex !== -1 ? req.url.substring(fapiIndex) : req.url;
+
+        // Try multiple Binance mirrors in order until one works
+        const binanceMirrors = [
+            'https://fapi.binance.me',
+            'https://fapi.binance.info',
+            'https://fapi.binance.com',
+            'https://fapi.binancezh.me'
+        ];
+
+        const tryProxy = (index) => {
+            if (index >= binanceMirrors.length) {
+                res.writeHead(502);
+                res.end('Error: All Binance mirrors failed from Proxy.');
+                return;
+            }
+
+            const target = binanceMirrors[index] + path;
+            console.log(`[PROXY ATTEMPT ${index}] -> ${target}`);
+
+            axios.get(target, {
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    'Accept': 'application/json'
+                },
+                timeout: 8000
+            })
+            .then(response => {
+                res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+                res.end(JSON.stringify(response.data));
+            })
+            .catch(err => {
+                console.warn(`[PROXY FAILED] Mirror ${binanceMirrors[index]} failed: ${err.message}`);
+                tryProxy(index + 1);
+            });
+        };
+
+        tryProxy(0);
         return;
     }
 
