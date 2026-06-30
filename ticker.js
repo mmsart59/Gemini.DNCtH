@@ -41,29 +41,6 @@ const server = http.createServer((req, res) => {
         return;
     }
 
-    // --- FULL BINANCE PROXY (Bypass 403 on App) ---
-    if (parsedUrl.pathname.startsWith('/fapi/v1/')) {
-        const target = 'https://fapi.binance.com' + req.url;
-        const headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'application/json',
-            'Cache-Control': 'no-cache'
-        };
-
-        axios.get(target, { headers, timeout: 8000 })
-            .then(response => {
-                res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-                res.end(JSON.stringify(response.data));
-            })
-            .catch(err => {
-                const status = err.response ? err.response.status : 500;
-                console.error(`[PROXY ERROR] ${parsedUrl.pathname} failed (${status}):`, err.message);
-                res.writeHead(status);
-                res.end(`Error: ${err.message}`);
-            });
-        return;
-    }
-
     // Web Dashboard for verification
     res.writeHead(200, { 'Content-Type': 'text/html' });
     res.end(`
@@ -153,7 +130,17 @@ const startTickerEngine = () => {
             arr.forEach(item => {
                 const sym = normalize(item.s);
                 if (APP_COINS.has(sym)) {
-                    tickerCache[sym] = { p: item.c, v: item.q, c: "0" };
+                    // Cache price, volume, and extract funding/OI if available from the stream
+                    // Note: miniTicker only gives price/volume.
+                    // To keep ticker.js simple and REST-free, we'll let the app handle
+                    // specific indicator streams, or upgrade this to @ticker for more data.
+                    tickerCache[sym] = {
+                        p: item.c,
+                        v: item.q,
+                        c: "0",
+                        r: tickerCache[sym]?.r || 0, // Preserve existing funding/OI if any
+                        o: tickerCache[sym]?.o || 0
+                    };
                 }
             });
         } catch (e) {}
