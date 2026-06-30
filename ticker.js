@@ -42,43 +42,24 @@ const server = http.createServer((req, res) => {
     }
 
     // --- FULL BINANCE PROXY (Bypass 403 on App) ---
-    // Handle both direct paths and paths prefixed with /ticker/ from the Cloudflare Worker
-    const cleanPath = parsedUrl.pathname.replace(/^\/ticker/, '');
-
-    // More robust matching for Binance API paths
-    if (cleanPath.includes('/fapi/v1/') || cleanPath.includes('/api/v3/') || cleanPath.includes('/fapi/v2/')) {
-        // Use req.url to get the query parameters, but remove the /ticker prefix if present
-        // We use req.url directly to preserve the full query string exactly as it came in
-        const target = 'https://fapi.binance.com' + req.url.replace(/^\/ticker/, '').replace('//', '/');
-
-        console.log(`[PROXY] ${req.method} ${req.url} -> ${target}`);
-
+    if (parsedUrl.pathname.startsWith('/fapi/v1/')) {
+        const target = 'https://fapi.binance.com' + req.url;
         const headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Accept': 'application/json',
             'Cache-Control': 'no-cache'
         };
 
-        axios({
-            method: req.method,
-            url: target,
-            headers: headers,
-            timeout: 10000
-        })
+        axios.get(target, { headers, timeout: 8000 })
             .then(response => {
-                res.writeHead(200, {
-                    'Content-Type': 'application/json',
-                    'Access-Control-Allow-Origin': '*',
-                    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-                    'Access-Control-Allow-Headers': 'Content-Type'
-                });
+                res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
                 res.end(JSON.stringify(response.data));
             })
             .catch(err => {
                 const status = err.response ? err.response.status : 500;
-                console.error(`[PROXY ERROR] ${cleanPath} failed (${status}):`, err.message);
-                res.writeHead(status, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-                res.end(JSON.stringify({ error: err.message, path: cleanPath }));
+                console.error(`[PROXY ERROR] ${parsedUrl.pathname} failed (${status}):`, err.message);
+                res.writeHead(status);
+                res.end(`Error: ${err.message}`);
             });
         return;
     }
@@ -133,19 +114,7 @@ const server = http.createServer((req, res) => {
                                 el.className = 'item';
                                 g.appendChild(el);
                             }
-                            const ticker = j.data[sym];
-                            const price = parseFloat(ticker.p).toLocaleString();
-                            const change = parseFloat(ticker.c);
-                            const changeColor = change > 0 ? '#45F7B9' : (change < 0 ? '#F83A7A' : '#fff');
-                            const changeSign = change > 0 ? '+' : '';
-
-                            el.innerHTML = \`
-                                <div class="sym">\${sym}</div>
-                                <div class="val">$\${price}</div>
-                                <div style="color: \${changeColor}; font-size: 0.8em; margin-top: 5px; font-weight: bold;">
-                                    \${changeSign}\${change}%
-                                </div>
-                            \`;
+                            el.innerHTML = '<div class="sym">' + sym + '</div><div class="val">$' + parseFloat(j.data[sym].p).toLocaleString() + '</div>';
                         });
                     }
                 };
@@ -184,13 +153,7 @@ const startTickerEngine = () => {
             arr.forEach(item => {
                 const sym = normalize(item.s);
                 if (APP_COINS.has(sym)) {
-                    // Calculate 24h Change Percentage
-                    // c = close (current price), o = open (24h ago)
-                    const price = parseFloat(item.c);
-                    const open = parseFloat(item.o);
-                    const change = open > 0 ? ((price - open) / open * 100).toFixed(2) : "0.00";
-
-                    tickerCache[sym] = { p: item.c, v: item.q, c: change };
+                    tickerCache[sym] = { p: item.c, v: item.q, c: "0" };
                 }
             });
         } catch (e) {}
@@ -204,61 +167,40 @@ const startTickerEngine = () => {
     });
 };
 
-// --- CLIENT MANAGEMENT (Optimized Global Broadcast) ---
-const clients = new Set();
-let lastBroadcastData = {};
-
+// --- CLIENT MANAGEMENT (Smart On-Demand Subscriptions) ---
 wss.on('connection', (ws) => {
     ws.subscribedTickers = new Set();
-    ws.lastSentPrices = {}; // For delta updates
-    clients.add(ws);
-    console.log(`[TICKER STATION] New Client Connected. Total: ${clients.size}`);
+    console.log(`[TICKER STATION] New Client Connected.`);
 
     ws.on('message', (msg) => {
         try {
             const j = JSON.parse(msg);
             if (j.op === 'subscribe_tickers') {
+                console.log(`[TICKER STATION] App requested: ${j.args.length} coins`);
                 j.args.forEach(s => ws.subscribedTickers.add(s.toUpperCase()));
             }
         } catch (e) {}
     });
 
-    ws.on('close', () => {
-        clients.delete(ws);
-        console.log(`[TICKER STATION] Client disconnected. Total: ${clients.size}`);
-    });
-});
-
-// SINGLE GLOBAL BROADCAST LOOP: 1 Second (Optimized for 2026 responsiveness)
-setInterval(() => {
-    if (clients.size === 0) return;
-
-    clients.forEach(ws => {
+    // BROADCAST LOOP: 10 Seconds
+    const sendTimer = setInterval(() => {
         if (ws.readyState !== WebSocket.OPEN) return;
 
         const filteredData = {};
-        let hasNewData = false;
-
         ws.subscribedTickers.forEach(sym => {
-            if (tickerCache[sym]) {
-                const current = tickerCache[sym];
-                const lastPrice = ws.lastSentPrices[sym];
-
-                // Only send if price changed or first time
-                // Using a 1s loop ensures high responsiveness for traders
-                if (!lastPrice || lastPrice !== current.p) {
-                    filteredData[sym] = current;
-                    ws.lastSentPrices[sym] = current.p;
-                    hasNewData = true;
-                }
-            }
+            if (tickerCache[sym]) filteredData[sym] = tickerCache[sym];
         });
 
-        if (hasNewData) {
+        if (Object.keys(filteredData).length > 0) {
             ws.send(JSON.stringify({ type: 'tickers', data: filteredData }));
         }
+    }, 10000);
+
+    ws.on('close', () => {
+        clearInterval(sendTimer);
+        console.log(`[TICKER STATION] Client disconnected.`);
     });
-}, 1000);
+});
 
 server.listen(port, () => {
     console.log(`Ticker Station LIVE on ${port}`);
