@@ -167,40 +167,60 @@ const startTickerEngine = () => {
     });
 };
 
-// --- CLIENT MANAGEMENT (Smart On-Demand Subscriptions) ---
+// --- CLIENT MANAGEMENT (Optimized Global Broadcast) ---
+const clients = new Set();
+let lastBroadcastData = {};
+
 wss.on('connection', (ws) => {
     ws.subscribedTickers = new Set();
-    console.log(`[TICKER STATION] New Client Connected.`);
+    ws.lastSentPrices = {}; // For delta updates
+    clients.add(ws);
+    console.log(`[TICKER STATION] New Client Connected. Total: ${clients.size}`);
 
     ws.on('message', (msg) => {
         try {
             const j = JSON.parse(msg);
             if (j.op === 'subscribe_tickers') {
-                console.log(`[TICKER STATION] App requested: ${j.args.length} coins`);
                 j.args.forEach(s => ws.subscribedTickers.add(s.toUpperCase()));
             }
         } catch (e) {}
     });
 
-    // BROADCAST LOOP: 10 Seconds
-    const sendTimer = setInterval(() => {
+    ws.on('close', () => {
+        clients.delete(ws);
+        console.log(`[TICKER STATION] Client disconnected. Total: ${clients.size}`);
+    });
+});
+
+// SINGLE GLOBAL BROADCAST LOOP: 10 Seconds
+setInterval(() => {
+    if (clients.size === 0) return;
+
+    clients.forEach(ws => {
         if (ws.readyState !== WebSocket.OPEN) return;
 
         const filteredData = {};
+        let hasNewData = false;
+
         ws.subscribedTickers.forEach(sym => {
-            if (tickerCache[sym]) filteredData[sym] = tickerCache[sym];
+            if (tickerCache[sym]) {
+                const current = tickerCache[sym];
+                const lastPrice = ws.lastSentPrices[sym];
+
+                // Only send if price changed or first time
+                if (!lastPrice || lastPrice !== current.p) {
+                    filteredData[sym] = current;
+                    ws.lastSentPrices[sym] = current.p;
+                    hasNewData = true;
+                }
+            }
         });
 
-        if (Object.keys(filteredData).length > 0) {
+        if (hasNewData) {
             ws.send(JSON.stringify({ type: 'tickers', data: filteredData }));
         }
-    }, 10000);
-
-    ws.on('close', () => {
-        clearInterval(sendTimer);
-        console.log(`[TICKER STATION] Client disconnected.`);
     });
-});
+}, 10000);
 
 server.listen(port, () => {
     console.log(`Ticker Station LIVE on ${port}`);
