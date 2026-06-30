@@ -31,7 +31,22 @@ const APP_COINS = new Set([
     "ONEUSDT", "STORJUSDT"
 ]);
 
-// --- HTTP SERVER (Keep Render Alive & Web View & REST Proxy) ---
+// --- PROXY CACHE & CONCURRENCY CONTROL ---
+const proxyCache = new Map();
+const inflightRequests = new Map();
+const CACHE_TTL = 15000; // 15 seconds cache
+
+// Cleanup cache periodically
+setInterval(() => {
+    const now = Date.now();
+    for (const [key, entry] of proxyCache.entries()) {
+        if (now - entry.timestamp > CACHE_TTL * 2) {
+            proxyCache.delete(key);
+        }
+    }
+}, 60000);
+
+// --- HTTP SERVER ---
 const server = http.createServer((req, res) => {
     const parsedUrl = urlParser.parse(req.url, true);
 
@@ -41,88 +56,106 @@ const server = http.createServer((req, res) => {
         return;
     }
 
-    // --- FULL BINANCE PROXY (Bypass 403 on App) ---
+    // --- FULL BINANCE PROXY (Bypass 403 on App with Caching) ---
     if (parsedUrl.pathname.startsWith('/fapi/v1/')) {
-        const target = 'https://fapi.binance.com' + req.url;
-        const headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'application/json',
-            'Cache-Control': 'no-cache'
-        };
+        const cacheKey = req.url;
+        const now = Date.now();
 
-        axios.get(target, { headers, timeout: 8000 })
-            .then(response => {
-                res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-                res.end(JSON.stringify(response.data));
-            })
-            .catch(err => {
-                const status = err.response ? err.response.status : 500;
-                console.error(`[PROXY ERROR] ${parsedUrl.pathname} failed (${status}):`, err.message);
-                res.writeHead(status);
+        // 1. Check Cache
+        if (proxyCache.has(cacheKey)) {
+            const entry = proxyCache.get(cacheKey);
+            if (now - entry.timestamp < CACHE_TTL) {
+                res.writeHead(200, {
+                    'Content-Type': 'application/json',
+                    'Access-Control-Allow-Origin': '*',
+                    'X-Proxy-Cache': 'HIT'
+                });
+                res.end(entry.data);
+                return;
+            }
+        }
+
+        // 2. Check In-flight Requests (Coalescing)
+        if (inflightRequests.has(cacheKey)) {
+            inflightRequests.get(cacheKey).then(data => {
+                res.writeHead(200, {
+                    'Content-Type': 'application/json',
+                    'Access-Control-Allow-Origin': '*',
+                    'X-Proxy-Cache': 'COALESCED'
+                });
+                res.end(data);
+            }).catch(err => {
+                res.writeHead(err.status || 500);
                 res.end(`Error: ${err.message}`);
             });
+            return;
+        }
+
+        // 3. Perform Fresh Request with Mirror Rotation
+        const mirrors = [
+            'https://fapi.binance.com',
+            'https://fapi.binance.me',
+            'https://fapi.binance.info',
+            'https://fapi.binancezh.me'
+        ];
+
+        const executeProxy = async () => {
+            let lastError = null;
+            for (const mirror of mirrors) {
+                try {
+                    const target = mirror + req.url;
+                    const headers = {
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                        'Accept': 'application/json',
+                        'Cache-Control': 'no-cache'
+                    };
+
+                    const response = await axios.get(target, { headers, timeout: 8000 });
+                    const data = JSON.stringify(response.data);
+
+                    proxyCache.set(cacheKey, { data, timestamp: Date.now() });
+                    return data;
+                } catch (err) {
+                    lastError = err;
+                    const status = err.response ? err.response.status : 500;
+                    console.error(`[PROXY ERROR] ${mirror}${parsedUrl.pathname} failed (${status}):`, err.message);
+
+                    // Only rotate on rate limits or server errors
+                    if (status !== 429 && status !== 418 && status < 500) {
+                        throw { status, message: err.message };
+                    }
+                    console.log(`>>> [PROXY] Rotating mirror for ${parsedUrl.pathname}...`);
+                }
+            }
+            throw { status: lastError.response ? lastError.response.status : 503, message: lastError.message };
+        };
+
+        const requestPromise = executeProxy();
+        inflightRequests.set(cacheKey, requestPromise);
+
+        requestPromise
+            .then(data => {
+                res.writeHead(200, {
+                    'Content-Type': 'application/json',
+                    'Access-Control-Allow-Origin': '*',
+                    'X-Proxy-Cache': 'MISS'
+                });
+                res.end(data);
+            })
+            .catch(err => {
+                res.writeHead(err.status || 500);
+                res.end(`Error: ${err.message}`);
+            })
+            .finally(() => {
+                inflightRequests.delete(cacheKey);
+            });
+
         return;
     }
 
-    // Web Dashboard for verification
+    // Web Dashboard (Simplified)
     res.writeHead(200, { 'Content-Type': 'text/html' });
-    res.end(`
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>TICKER STATION (FRANKFURT)</title>
-            <style>
-                body { background: #000; color: #fff; font-family: 'JetBrains Mono', monospace; padding: 20px; }
-                .container { background: rgba(20,20,20,0.7); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); border: 1px solid rgba(255,255,255,0.1); border-radius: 12px; padding: 20px; box-shadow: 0 8px 32px rgba(0,0,0,0.5); }
-                .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; }
-                .item { background: rgba(255,255,255,0.03); padding: 15px; border: 1px solid rgba(255,255,255,0.05); border-radius: 8px; transition: all 0.3s ease; }
-                .item:hover { background: rgba(255,255,255,0.07); border-color: rgba(255,255,255,0.1); transform: translateY(-2px); }
-                .val { font-weight: 800; font-size: 1.3em; color: #fff; margin-top: 5px; }
-                .sym { color: #666; font-size: 0.9em; letter-spacing: 1px; font-weight: bold; }
-                h1 { font-weight: 800; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 15px; margin-top: 0; display: flex; justify-content: space-between; align-items: center; }
-                #status { font-size: 10px; color: #45F7B9; text-transform: uppercase; letter-spacing: 2px; margin-bottom: 20px; }
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <h1>📡 TICKER STATION <span style="font-size: 10px; color: #444;">V2.0 PRO</span></h1>
-                <div id="status">INITIALIZING...</div>
-                <div id="g" class="grid"></div>
-            </div>
-            <script>
-                const g = document.getElementById('g');
-                const s = document.getElementById('status');
-
-                const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-                const ws = new WebSocket(protocol + '//' + window.location.host);
-
-                ws.onopen = () => {
-                    s.innerText = 'CONNECTED - ENCRYPTED TUNNEL ACTIVE';
-                    ws.send(JSON.stringify({
-                        op: 'subscribe_tickers',
-                        args: ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT', 'ADAUSDT', 'DOGEUSDT', 'TRXUSDT', 'DOTUSDT', 'MATICUSDT']
-                    }));
-                };
-                ws.onmessage = (e) => {
-                    const j = JSON.parse(e.data);
-                    if (j.type === 'tickers') {
-                        Object.keys(j.data).forEach(sym => {
-                            let el = document.getElementById('s_' + sym);
-                            if (!el) {
-                                el = document.createElement('div');
-                                el.id = 's_' + sym;
-                                el.className = 'item';
-                                g.appendChild(el);
-                            }
-                            el.innerHTML = '<div class="sym">' + sym + '</div><div class="val">$' + parseFloat(j.data[sym].p).toLocaleString() + '</div>';
-                        });
-                    }
-                };
-                ws.onclose = () => { s.innerText = 'DISCONNECTED'; s.style.color = '#F83A7A'; };
-            </script>
-        </body>
-        </html>
-    `);
+    res.end(`<h1>📡 TICKER STATION LIVE</h1><p>Frankfurt Proxy Active with Caching & Mirror Rotation</p>`);
 });
 
 // --- WEBSOCKET SERVER (For App/Web) ---
@@ -135,15 +168,13 @@ const startTickerEngine = () => {
     if (engineActive) return;
     engineActive = true;
 
-    console.log('>>> [TICKER STATION] Connecting to Binance Market Stream (Global)...');
+    console.log('>>> [TICKER STATION] Connecting to Binance Market Stream...');
     const url = 'wss://fstream.binance.com/market/ws/!miniTicker@arr';
     const ws = new WebSocket(url);
 
     ws.on('open', () => {
-        console.log('>>> [TICKER STATION] Binance Stream Connected. Caching App Coins.');
-        ws.pingTimer = setInterval(() => {
-            if(ws.readyState === WebSocket.OPEN) ws.ping();
-        }, 30000);
+        console.log('>>> [TICKER STATION] Binance Stream Connected.');
+        ws.pingTimer = setInterval(() => { if(ws.readyState === WebSocket.OPEN) ws.ping(); }, 30000);
     });
 
     ws.on('message', (data) => {
@@ -167,39 +198,25 @@ const startTickerEngine = () => {
     });
 };
 
-// --- CLIENT MANAGEMENT (Smart On-Demand Subscriptions) ---
 wss.on('connection', (ws) => {
     ws.subscribedTickers = new Set();
-    console.log(`[TICKER STATION] New Client Connected.`);
-
     ws.on('message', (msg) => {
         try {
             const j = JSON.parse(msg);
             if (j.op === 'subscribe_tickers') {
-                console.log(`[TICKER STATION] App requested: ${j.args.length} coins`);
                 j.args.forEach(s => ws.subscribedTickers.add(s.toUpperCase()));
             }
         } catch (e) {}
     });
 
-    // BROADCAST LOOP: 10 Seconds
     const sendTimer = setInterval(() => {
         if (ws.readyState !== WebSocket.OPEN) return;
-
         const filteredData = {};
-        ws.subscribedTickers.forEach(sym => {
-            if (tickerCache[sym]) filteredData[sym] = tickerCache[sym];
-        });
-
-        if (Object.keys(filteredData).length > 0) {
-            ws.send(JSON.stringify({ type: 'tickers', data: filteredData }));
-        }
+        ws.subscribedTickers.forEach(sym => { if (tickerCache[sym]) filteredData[sym] = tickerCache[sym]; });
+        if (Object.keys(filteredData).length > 0) ws.send(JSON.stringify({ type: 'tickers', data: filteredData }));
     }, 10000);
 
-    ws.on('close', () => {
-        clearInterval(sendTimer);
-        console.log(`[TICKER STATION] Client disconnected.`);
-    });
+    ws.on('close', () => clearInterval(sendTimer));
 });
 
 server.listen(port, () => {
