@@ -100,7 +100,6 @@ const server = http.createServer((req, res) => {
 
         // 3. Perform Fresh Request with Mirror Rotation
         const mirrors = [
-            'https://api-gcp.binance.com', // 6/2026: GCP-optimized mirror for Frankfurt/Render
             'https://fapi.binance.com',
             'https://fapi.binance.me',
             'https://fapi.binance.info',
@@ -125,6 +124,7 @@ const server = http.createServer((req, res) => {
                     });
                     const data = JSON.stringify(response.data);
 
+                    console.log(`[PROXY SUCCESS] ${mirror}${parsedUrl.pathname} responded 200 OK`);
                     proxyCache.set(cacheKey, { data, timestamp: Date.now() });
                     return data;
                 } catch (err) {
@@ -132,7 +132,7 @@ const server = http.createServer((req, res) => {
                     const status = err.response ? err.response.status : 500;
                     console.error(`[PROXY ERROR] ${mirror}${parsedUrl.pathname} failed (${status}):`, err.message);
 
-                    // Only rotate on rate limits or server errors
+                    // Only rotate on rate limits, IP bans, or server errors
                     if (status !== 429 && status !== 418 && status < 500) {
                         throw { status, message: err.message };
                     }
