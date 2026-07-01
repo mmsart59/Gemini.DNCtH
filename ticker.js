@@ -112,10 +112,13 @@ const startTickerEngine = () => {
                 const sym = normalize(item.s);
                 if (APP_COINS.has(sym)) {
                     const rawPrice = parseFloat(item.c);
+                    const openPrice = parseFloat(item.o);
+                    const change = openPrice !== 0 ? ((rawPrice - openPrice) / openPrice * 100).toFixed(2) : "0.00";
+
                     // Option 2: Precision Truncation (Data Saver)
                     const p = rawPrice >= 1000 ? rawPrice.toFixed(2) : rawPrice.toPrecision(6);
                     const ind = indicators[sym] || { r: 50, e: 0, cv: 0 };
-                    tickerCache[sym] = { p, v: item.q, r: ind.r, e: ind.e, cv: ind.cv };
+                    tickerCache[sym] = { p, v: item.q, c: change, r: ind.r, e: ind.e, cv: ind.cv };
                 }
             });
         } catch (e) {}
@@ -187,4 +190,8 @@ wss.on('connection', (ws) => {
     ws.on('close', () => clearInterval(sendTimer));
 });
 
-server.listen(port, () => { console.log(`Ticker Station LIVE on ${port}`); startTickerEngine(); updateIndicators(); });
+server.listen(port, '0.0.0.0', () => {
+    console.log(`Ticker Station LIVE on ${port} (0.0.0.0)`);
+    startTickerEngine();
+    updateIndicators();
+});
