@@ -82,8 +82,14 @@ const updateIndicators = async () => {
             const ema = calculateEMA(closes);
             const price = closes[closes.length - 1];
 
-            const oi = parseFloat(oiRes.data.openInterest);
-            const fr = parseFloat(frRes.data.lastFundingRate);
+            let oi = 0;
+            try {
+                oi = parseFloat(oiRes.data.openInterest) || 0;
+            } catch (e) {
+                console.error(`[OI ERROR] Failed to parse OI for ${sym}:`, e.message);
+            }
+
+            const fr = parseFloat(frRes.data.lastFundingRate) || 0;
 
             // --- REFINED CONVICTION LOGIC (Less Flashy) ---
             let conv = 0;
