@@ -2,7 +2,6 @@ const WebSocket = require('ws');
 const http = require('http');
 const https = require('https');
 const axios = require('axios');
-const urlParser = require('url');
 
 /**
  * TICKER STATION (June 2026 - Ultra Optimized)
@@ -36,12 +35,10 @@ const APP_COINS = new Set([
 
 // --- PROXY CACHE ---
 const proxyCache = new Map();
-const inflightRequests = new Map();
 const CACHE_TTL = 15000;
 
 // --- TICKER ENGINE ---
 let tickerCache = {};
-let lastSentCache = new Map();
 let engineActive = false;
 
 // --- INDICATOR ENGINE ---
@@ -88,7 +85,7 @@ const updateIndicators = async () => {
                 e: price > ema ? 1 : 0,
                 cv: conv
             };
-            await new Promise(r => setTimeout(r, 100));
+            await new Promise(r => setTimeout(r, 200)); // Slower stagger
         } catch (e) {}
     }
 };
@@ -123,10 +120,14 @@ const startTickerEngine = () => {
 
 // --- HTTP SERVER ---
 const server = http.createServer((req, res) => {
-    const parsedUrl = urlParser.parse(req.url, true);
-    if (parsedUrl.pathname === '/ping') return res.end('PONG');
+    const url = new URL(req.url, `http://${req.headers.host}`);
 
-    if (parsedUrl.pathname.startsWith('/fapi/v1/')) {
+    if (url.pathname === '/ping') {
+        res.writeHead(200, { 'Content-Type': 'text/plain', 'Access-Control-Allow-Origin': '*' });
+        return res.end('PONG');
+    }
+
+    if (url.pathname.startsWith('/fapi/v1/')) {
         const cacheKey = req.url;
         if (proxyCache.has(cacheKey)) {
             const entry = proxyCache.get(cacheKey);
@@ -135,8 +136,60 @@ const server = http.createServer((req, res) => {
                 return res.end(entry.data);
             }
         }
-        res.end("Use WebSocket for tickers.");
+        res.writeHead(200, { 'Content-Type': 'text/plain' });
+        return res.end("Use WebSocket for tickers.");
     }
+
+    // Default: Web Dashboard
+    res.writeHead(200, { 'Content-Type': 'text/html' });
+    res.end(`
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>TICKER STATION (FRANKFURT)</title>
+            <style>
+                body { background: #000; color: #fff; font-family: monospace; padding: 20px; line-height: 1.5; }
+                .container { border: 1px solid #333; border-radius: 8px; padding: 20px; }
+                .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 10px; }
+                .item { background: #111; padding: 10px; border-radius: 4px; border-left: 3px solid #45F7B9; }
+                .sym { color: #888; font-weight: bold; }
+                .val { font-size: 1.2em; }
+                h1 { margin-top: 0; color: #45F7B9; border-bottom: 1px solid #333; padding-bottom: 10px; }
+                #status { font-size: 0.8em; color: #666; margin-bottom: 20px; }
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <h1>📡 TICKER STATION LIVE</h1>
+                <div id="status">FRANKFURT NODE ACTIVE - 0.0.0.0:${port}</div>
+                <div id="g" class="grid"></div>
+            </div>
+            <script>
+                const g = document.getElementById('g');
+                const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+                const ws = new WebSocket(protocol + '//' + window.location.host);
+                ws.onopen = () => {
+                    ws.send(JSON.stringify({ op: 'subscribe_tickers', args: ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT'] }));
+                };
+                ws.onmessage = (e) => {
+                    const j = JSON.parse(e.data);
+                    if (j.type === 'tickers') {
+                        Object.keys(j.data).forEach(sym => {
+                            let el = document.getElementById('s_' + sym);
+                            if (!el) {
+                                el = document.createElement('div');
+                                el.id = 's_' + sym;
+                                el.className = 'item';
+                                g.appendChild(el);
+                            }
+                            el.innerHTML = '<div class="sym">' + sym + '</div><div class="val">$' + parseFloat(j.data[sym].p).toLocaleString() + '</div>';
+                        });
+                    }
+                };
+            </script>
+        </body>
+        </html>
+    `);
 });
 
 const wss = new WebSocket.Server({ server });
@@ -177,15 +230,10 @@ wss.on('connection', (ws) => {
     ws.on('close', () => clearInterval(sendTimer));
 });
 
-// --- CRITICAL BOOT SEQUENCE FOR RENDER ---
-console.log(`>>> [BOOT] Starting Ticker Station on port ${port}...`);
+// --- BOOT SEQUENCE ---
 server.listen(port, '0.0.0.0', () => {
-    console.log(`==> [SUCCESS] Server bound to 0.0.0.0:${port}`);
-
-    // Defer ALL background logic until AFTER port is confirmed
-    setImmediate(() => {
-        startTickerEngine();
-        updateIndicators();
-        setInterval(updateIndicators, 300000);
-    });
+    console.log(`==> [READY] Ticker Station bound to 0.0.0.0:${port}`);
+    startTickerEngine();
+    setTimeout(updateIndicators, 1000);
+    setInterval(updateIndicators, 300000);
 });
