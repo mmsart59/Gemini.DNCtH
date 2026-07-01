@@ -5,7 +5,7 @@ const axios = require('axios');
 const urlParser = require('url');
 
 /**
- * TICKER STATION (June 2026 - Ultra Optimized)
+ * TICKER STATION (June 2026 - Ultra Optimized V3)
  * Standalone server for fast Binance Ticker updates + REST Proxy.
  * Frankfurt-based to bypass US geo-restrictions.
  */
@@ -42,8 +42,9 @@ const CACHE_TTL = 15000;
 let tickerCache = {};
 let engineActive = false;
 
-// --- INDICATOR ENGINE ---
+// --- METRICS STATE (Option 2 & 3: Persistence for Trend Calculation) ---
 const indicators = {};
+const previousMetrics = {}; // Stores last known OI/FR for trend detection
 
 const calculateRSI = (closes, period = 14) => {
     if (closes.length <= period) return 50;
@@ -67,7 +68,7 @@ const calculateEMA = (closes, period = 20) => {
 };
 
 const updateIndicators = async () => {
-    console.log('>>> [INDICATORS] Refreshing Server-Side Analytics...');
+    console.log('>>> [METRICS] Refreshing Market Analytics...');
     for (const sym of APP_COINS) {
         try {
             const [kRes, oiRes, frRes] = await Promise.all([
@@ -82,43 +83,48 @@ const updateIndicators = async () => {
             const ema = calculateEMA(closes);
             const price = closes[closes.length - 1];
 
-            let oi = 0;
-            try {
-                oi = parseFloat(oiRes.data.openInterest) || 0;
-            } catch (e) {
-                console.error(`[OI ERROR] Failed to parse OI for ${sym}:`, e.message);
+            const rawOI = parseFloat(oiRes.data.openInterest);
+            const rawFR = parseFloat(frRes.data.lastFundingRate);
+
+            // --- OPTION 2: OI TREND CALCULATION ---
+            const prev = previousMetrics[sym] || { oi: rawOI, fr: rawFR };
+            // 1 = Rising, -1 = Falling, 0 = Flat
+            let oiTrend = 0;
+            if (rawOI > prev.oi * 1.001) oiTrend = 1; // 0.1% threshold for noise
+            else if (rawOI < prev.oi * 0.999) oiTrend = -1;
+
+            // --- OPTION 3: FUNDING SURGE DETECTION ---
+            let frSurge = 0;
+            const frDiffPct = prev.fr !== 0 ? Math.abs((rawFR - prev.fr) / prev.fr) : 0;
+            // Rule: >50% change AND current > 0.005%
+            if (frDiffPct > 0.50 && Math.abs(rawFR) > 0.00005) {
+                frSurge = 1;
             }
 
-            const fr = parseFloat(frRes.data.lastFundingRate) || 0;
+            // Update previous for next cycle
+            previousMetrics[sym] = { oi: rawOI, fr: rawFR };
 
-            // --- REFINED CONVICTION LOGIC (Less Flashy) ---
+            // --- REFINED CONVICTION LOGIC ---
             let conv = 0;
-
-            // Rule 1: EMA Signal (Must be > 0.5% away to count)
             if (Math.abs(price - ema) / ema > 0.005) conv++;
-
-            // Rule 2: RSI Overbought/Oversold (Extreme only)
             if (rsi > 72 || rsi < 28) conv++;
-
-            // Rule 3: High Volume strength
             const latestVol = volumes[volumes.length - 1];
             const avgVol = volumes.slice(-21).reduce((a, b) => a + b, 0) / 21;
             if (latestVol > avgVol * 1.5) conv++;
-
-            // Rule 4: Open Interest Signal (High OI for symbol)
-            if (oi > 0) conv++;
-
-            // Rule 5: Funding Rate Signal (Significant cost to hold)
-            if (Math.abs(fr) >= 0.0001) conv++;
+            if (oiTrend === 1) conv++;
+            if (Math.abs(rawFR) >= 0.0001) conv++;
 
             indicators[sym] = {
                 r: Math.round(rsi),
                 e: price > ema ? 1 : 0,
                 cv: conv,
-                oi: oi,
-                fr: fr
+                oi: rawOI,
+                oit: oiTrend, // OI Trend flag
+                fr: rawFR,
+                frs: frSurge, // FR Surge flag
+                v21: avgVol   // 21-period average volume
             };
-            await new Promise(r => setTimeout(r, 250)); // Slower stagger to be safe
+            await new Promise(r => setTimeout(r, 200));
         } catch (e) {}
     }
 };
@@ -129,7 +135,7 @@ const startTickerEngine = () => {
     engineActive = true;
     const ws = new WebSocket('wss://fstream.binance.com/market/ws/!miniTicker@arr');
     ws.on('open', () => {
-        console.log('>>> [TICKER STATION] Stream Connected.');
+        console.log('>>> [TICKER STATION] Market Stream Connected.');
         ws.pingTimer = setInterval(() => ws.readyState === WebSocket.OPEN && ws.ping(), 30000);
     });
     ws.on('message', (data) => {
@@ -143,11 +149,16 @@ const startTickerEngine = () => {
                     const change = openPrice !== 0 ? ((rawPrice - openPrice) / openPrice * 100).toFixed(2) : "0.00";
                     const p = rawPrice >= 1000 ? rawPrice.toFixed(2) : rawPrice.toPrecision(6);
 
-                    const ind = indicators[sym] || { r: 50, e: 0, cv: 0, oi: 0, fr: 0 };
+                    const ind = indicators[sym] || { r: 50, e: 0, cv: 0, oi: 0, oit: 0, fr: 0, frs: 0, v21: 0 };
+
+                    // --- OPTION 1: VOLUME RATIO CALCULATION ---
+                    const volRatio = ind.v21 > 0 ? (parseFloat(item.q) / ind.v21).toFixed(2) : "1.00";
+
                     tickerCache[sym] = {
-                        p, v: item.q, c: change,
+                        p, v: item.q, vr: volRatio, c: change,
                         r: ind.r, e: ind.e, cv: ind.cv,
-                        oi: ind.oi, fr: ind.fr
+                        oi: ind.oi, oit: ind.oit,
+                        fr: ind.fr, frs: ind.frs
                     };
                 }
             });
@@ -159,12 +170,7 @@ const startTickerEngine = () => {
 // --- HTTP SERVER ---
 const server = http.createServer((req, res) => {
     const url = new URL(req.url, `http://${req.headers.host}`);
-
-    if (url.pathname === '/ping') {
-        res.writeHead(200, { 'Content-Type': 'text/plain', 'Access-Control-Allow-Origin': '*' });
-        return res.end('PONG');
-    }
-
+    if (url.pathname === '/ping') return res.end('PONG');
     if (url.pathname.startsWith('/fapi/v1/')) {
         const cacheKey = req.url;
         if (proxyCache.has(cacheKey)) {
@@ -174,103 +180,44 @@ const server = http.createServer((req, res) => {
                 return res.end(entry.data);
             }
         }
-        res.writeHead(200, { 'Content-Type': 'text/plain' });
-        return res.end("Use WebSocket for tickers.");
+        res.end("Use WebSocket Tunnel.");
     }
-
-    // Default: Web Dashboard
+    // Dashboard
     res.writeHead(200, { 'Content-Type': 'text/html' });
-    res.end(`
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>TICKER STATION (FRANKFURT)</title>
-            <style>
-                body { background: #000; color: #fff; font-family: monospace; padding: 20px; line-height: 1.5; }
-                .container { border: 1px solid #333; border-radius: 8px; padding: 20px; }
-                .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 10px; }
-                .item { background: #111; padding: 10px; border-radius: 4px; border-left: 3px solid #45F7B9; }
-                .sym { color: #888; font-weight: bold; }
-                .val { font-size: 1.2em; }
-                h1 { margin-top: 0; color: #45F7B9; border-bottom: 1px solid #333; padding-bottom: 10px; }
-                #status { font-size: 0.8em; color: #666; margin-bottom: 20px; }
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <h1>📡 TICKER STATION LIVE</h1>
-                <div id="status">FRANKFURT NODE ACTIVE - 0.0.0.0:${port}</div>
-                <div id="g" class="grid"></div>
-            </div>
-            <script>
-                const g = document.getElementById('g');
-                const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-                const ws = new WebSocket(protocol + '//' + window.location.host);
-                ws.onopen = () => {
-                    ws.send(JSON.stringify({ op: 'subscribe_tickers', args: ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT'] }));
-                };
-                ws.onmessage = (e) => {
-                    const j = JSON.parse(e.data);
-                    if (j.type === 'tickers') {
-                        Object.keys(j.data).forEach(sym => {
-                            let el = document.getElementById('s_' + sym);
-                            if (!el) {
-                                el = document.createElement('div');
-                                el.id = 's_' + sym;
-                                el.className = 'item';
-                                g.appendChild(el);
-                            }
-                            el.innerHTML = '<div class="sym">' + sym + '</div><div class="val">$' + parseFloat(j.data[sym].p).toLocaleString() + '</div>';
-                        });
-                    }
-                };
-            </script>
-        </body>
-        </html>
-    `);
+    res.end(`<h1>📡 TICKER STATION LIVE</h1><p>Frankfurt Optimization Active</p>`);
 });
 
 const wss = new WebSocket.Server({ server });
 wss.on('connection', (ws) => {
     ws.subscribedTickers = new Set();
-    ws.isBackground = false;
     ws.lastSent = new Map();
-
     ws.on('message', (msg) => {
         try {
             const j = JSON.parse(msg);
-            if (j.op === 'subscribe_tickers') {
-                j.args.forEach(s => ws.subscribedTickers.add(s.toUpperCase()));
-            } else if (j.op === 'set_background') {
-                ws.isBackground = !!j.value;
-            }
+            if (j.op === 'subscribe_tickers') j.args.forEach(s => ws.subscribedTickers.add(s.toUpperCase()));
+            else if (j.op === 'set_background') ws.isBackground = !!j.value;
         } catch (e) {}
     });
 
     const sendTimer = setInterval(() => {
         if (ws.readyState !== WebSocket.OPEN) return;
-        if (ws.isBackground && ws.subscribedTickers.size > 10) return;
         const deltaData = {};
         ws.subscribedTickers.forEach(sym => {
             const data = tickerCache[sym];
             if (!data) return;
             const last = ws.lastSent.get(sym);
-            if (!last || last.p !== data.p || last.r !== data.r) {
+            if (!last || last.p !== data.p || last.r !== data.r || last.vr !== data.vr) {
                 deltaData[sym] = data;
                 ws.lastSent.set(sym, data);
             }
         });
-        if (Object.keys(deltaData).length > 0) {
-            ws.send(JSON.stringify({ type: 'tickers', data: deltaData }));
-        }
+        if (Object.keys(deltaData).length > 0) ws.send(JSON.stringify({ type: 'tickers', data: deltaData }));
     }, 10000);
-
     ws.on('close', () => clearInterval(sendTimer));
 });
 
-// --- BOOT SEQUENCE ---
 server.listen(port, '0.0.0.0', () => {
-    console.log(`==> [READY] Ticker Station bound to 0.0.0.0:${port}`);
+    console.log(`==> [READY] Ticker Station LIVE`);
     startTickerEngine();
     setTimeout(updateIndicators, 1000);
     setInterval(updateIndicators, 300000);
