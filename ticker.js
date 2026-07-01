@@ -193,5 +193,6 @@ wss.on('connection', (ws) => {
 server.listen(port, '0.0.0.0', () => {
     console.log(`Ticker Station LIVE on ${port} (0.0.0.0)`);
     startTickerEngine();
-    updateIndicators();
+    // Start indicators AFTER the server is already listening to satisfy Render's port scan
+    setTimeout(updateIndicators, 5000);
 });
