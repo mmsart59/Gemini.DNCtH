@@ -72,13 +72,32 @@ const updateIndicators = async () => {
             const url = `https://fapi.binance.com/fapi/v1/klines?symbol=${sym}&interval=1h&limit=60`;
             const res = await axios.get(url, { httpsAgent, timeout: 5000 });
             const closes = res.data.map(k => parseFloat(k[4]));
+            const volumes = res.data.map(k => parseFloat(k[5]));
             const rsi = calculateRSI(closes);
             const ema = calculateEMA(closes);
             const price = closes[closes.length - 1];
 
+            // --- FULL CONVICTION LOGIC (Option 4: Preserved Coloring Logic) ---
             let conv = 0;
+
+            // Rule 1: EMA Signal
+            if (price > ema || price < ema) conv++;
+
+            // Rule 2: RSI Overbought/Oversold
             if (rsi > 70 || rsi < 30) conv++;
+
+            // Rule 3: High Volume strength (Latest vs Average)
+            const latestVol = volumes[volumes.length - 1];
+            const avgVol = volumes.slice(-21).reduce((a, b) => a + b, 0) / 21;
+            if (latestVol > avgVol * 1.5) conv++;
+
+            // Rule 4: Price Trend Agreement (Price > EMA AND RSI > 50)
             if ((price > ema && rsi > 50) || (price < ema && rsi < 50)) conv++;
+
+            // Rule 5: Volatility / Big Move (Change > 2%)
+            const openPrice = parseFloat(res.data[0][1]);
+            const pctChange = Math.abs((price - openPrice) / openPrice * 100);
+            if (pctChange > 2.0) conv++;
 
             indicators[sym] = {
                 r: Math.round(rsi),
