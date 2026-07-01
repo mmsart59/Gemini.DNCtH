@@ -3,11 +3,10 @@ const http = require('http');
 const https = require('https');
 const axios = require('axios');
 const urlParser = require('url');
-const crypto = require('crypto');
 
 /**
  * TICKER STATION (June 2026 - Ultra Optimized)
- * Standalone server for fast Binance Ticker updates + WS-FAPI Tunnel Proxy.
+ * Standalone server for fast Binance Ticker updates + REST Proxy.
  * Frankfurt-based to bypass US geo-restrictions.
  */
 
@@ -54,67 +53,6 @@ setInterval(() => {
     }
 }, 60000);
 
-// --- WS-FAPI TUNNEL MANAGER (The 2026 "Weight-Shield" Bypass) ---
-const WS_FAPI_URL = 'wss://ws-fapi.binance.com:9443/ws-fapi/v1?returnRateLimits=false';
-let wsFapi = null;
-const wsFapiRequests = new Map();
-let wsFapiReady = false;
-
-const initWsFapi = () => {
-    console.log('>>> [TUNNEL] Opening WS-FAPI Tunnel to bypass REST WAF (403/418)...');
-    wsFapi = new WebSocket(WS_FAPI_URL);
-
-    wsFapi.on('open', () => {
-        console.log('>>> [TUNNEL] WS-FAPI Ready. REST traffic now tunneled.');
-        wsFapiReady = true;
-    });
-
-    wsFapi.on('message', (data) => {
-        try {
-            const json = JSON.parse(data);
-            if (json.id && wsFapiRequests.has(json.id)) {
-                const { resolve, reject } = wsFapiRequests.get(json.id);
-                if (json.status === 200) {
-                    resolve(json.result);
-                } else {
-                    reject({ status: json.status, message: json.error?.msg || 'WS-FAPI Error' });
-                }
-                wsFapiRequests.delete(json.id);
-            }
-        } catch (e) {
-            console.error('[TUNNEL MSG ERROR]', e.message);
-        }
-    });
-
-    wsFapi.on('close', () => {
-        console.log('--- [TUNNEL] WS-FAPI Lost. Reconnecting... ---');
-        wsFapiReady = false;
-        setTimeout(initWsFapi, 5000);
-    });
-
-    wsFapi.on('error', (err) => console.error('[TUNNEL ERROR]', err.message));
-};
-
-const sendWsFapi = (method, params) => {
-    return new Promise((resolve, reject) => {
-        if (!wsFapiReady) return reject({ status: 503, message: 'Tunnel Not Ready' });
-
-        const id = crypto.randomUUID();
-        const request = { id, method, params };
-
-        wsFapiRequests.set(id, { resolve, reject });
-        wsFapi.send(JSON.stringify(request));
-
-        // Timeout after 10s
-        setTimeout(() => {
-            if (wsFapiRequests.has(id)) {
-                wsFapiRequests.delete(id);
-                reject({ status: 504, message: 'Tunnel Timeout' });
-            }
-        }, 10000);
-    });
-};
-
 // --- HTTP SERVER ---
 const server = http.createServer((req, res) => {
     const parsedUrl = urlParser.parse(req.url, true);
@@ -160,37 +98,16 @@ const server = http.createServer((req, res) => {
             return;
         }
 
-        // 4. Perform Fresh Request with Tunnel or Mirror Rotation
+        // 3. Perform Fresh Request with Mirror Rotation
         const mirrors = [
-            'https://fapi.binance.com',
             'https://api-gcp.binance.com', // 6/2026: GCP-optimized mirror for Frankfurt/Render
+            'https://fapi.binance.com',
             'https://fapi.binance.me',
             'https://fapi.binance.info',
             'https://fapi.binancezh.me'
         ];
 
         const executeProxy = async () => {
-            // --- 6/2026 METHOD: Tunnel specific endpoints via WS-FAPI to bypass WAF ---
-            const methodMap = {
-                '/fapi/v1/openInterest': 'openInterest',
-                '/fapi/v1/klines': 'klines',
-                '/fapi/v1/premiumIndex': 'premiumIndex',
-                '/fapi/v1/ticker/24hr': 'ticker.24hr'
-            };
-
-            const wsMethod = methodMap[parsedUrl.pathname];
-            if (wsMethod && wsFapiReady) {
-                try {
-                    console.log(`>>> [TUNNEL] Routing ${parsedUrl.pathname} through WS-FAPI...`);
-                    const result = await sendWsFapi(wsMethod, parsedUrl.query);
-                    const data = JSON.stringify(result);
-                    proxyCache.set(cacheKey, { data, timestamp: Date.now() });
-                    return data;
-                } catch (err) {
-                    console.warn(`[TUNNEL FAILED] ${parsedUrl.pathname} via WS, falling back to REST:`, err.message);
-                }
-            }
-
             let lastError = null;
             for (const mirror of mirrors) {
                 try {
@@ -317,5 +234,4 @@ wss.on('connection', (ws) => {
 server.listen(port, () => {
     console.log(`Ticker Station LIVE on ${port}`);
     startTickerEngine();
-    initWsFapi();
 });
