@@ -160,9 +160,10 @@ const server = http.createServer((req, res) => {
             return;
         }
 
-        // 3. Perform Fresh Request with Mirror Rotation
+        // 4. Perform Fresh Request with Tunnel or Mirror Rotation
         const mirrors = [
             'https://fapi.binance.com',
+            'https://api-gcp.binance.com', // 6/2026: GCP-optimized mirror for Frankfurt/Render
             'https://fapi.binance.me',
             'https://fapi.binance.info',
             'https://fapi.binancezh.me'
