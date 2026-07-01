@@ -2,6 +2,7 @@ const WebSocket = require('ws');
 const http = require('http');
 const https = require('https');
 const axios = require('axios');
+const urlParser = require('url');
 
 /**
  * TICKER STATION (June 2026 - Ultra Optimized)
@@ -69,42 +70,49 @@ const updateIndicators = async () => {
     console.log('>>> [INDICATORS] Refreshing Server-Side Analytics...');
     for (const sym of APP_COINS) {
         try {
-            const url = `https://fapi.binance.com/fapi/v1/klines?symbol=${sym}&interval=1h&limit=60`;
-            const res = await axios.get(url, { httpsAgent, timeout: 5000 });
-            const closes = res.data.map(k => parseFloat(k[4]));
-            const volumes = res.data.map(k => parseFloat(k[5]));
+            const [kRes, oiRes, frRes] = await Promise.all([
+                axios.get(`https://fapi.binance.com/fapi/v1/klines?symbol=${sym}&interval=1h&limit=60`, { httpsAgent, timeout: 5000 }),
+                axios.get(`https://fapi.binance.com/fapi/v1/openInterest?symbol=${sym}`, { httpsAgent, timeout: 5000 }),
+                axios.get(`https://fapi.binance.com/fapi/v1/premiumIndex?symbol=${sym}`, { httpsAgent, timeout: 5000 })
+            ]);
+
+            const closes = kRes.data.map(k => parseFloat(k[4]));
+            const volumes = kRes.data.map(k => parseFloat(k[5]));
             const rsi = calculateRSI(closes);
             const ema = calculateEMA(closes);
             const price = closes[closes.length - 1];
 
-            // --- FULL CONVICTION LOGIC (Option 4: Preserved Coloring Logic) ---
+            const oi = parseFloat(oiRes.data.openInterest);
+            const fr = parseFloat(frRes.data.lastFundingRate);
+
+            // --- REFINED CONVICTION LOGIC (Less Flashy) ---
             let conv = 0;
 
-            // Rule 1: EMA Signal
-            if (price > ema || price < ema) conv++;
+            // Rule 1: EMA Signal (Must be > 0.5% away to count)
+            if (Math.abs(price - ema) / ema > 0.005) conv++;
 
-            // Rule 2: RSI Overbought/Oversold
-            if (rsi > 70 || rsi < 30) conv++;
+            // Rule 2: RSI Overbought/Oversold (Extreme only)
+            if (rsi > 72 || rsi < 28) conv++;
 
-            // Rule 3: High Volume strength (Latest vs Average)
+            // Rule 3: High Volume strength
             const latestVol = volumes[volumes.length - 1];
             const avgVol = volumes.slice(-21).reduce((a, b) => a + b, 0) / 21;
             if (latestVol > avgVol * 1.5) conv++;
 
-            // Rule 4: Price Trend Agreement (Price > EMA AND RSI > 50)
-            if ((price > ema && rsi > 50) || (price < ema && rsi < 50)) conv++;
+            // Rule 4: Open Interest Signal (High OI for symbol)
+            if (oi > 0) conv++;
 
-            // Rule 5: Volatility / Big Move (Change > 2%)
-            const openPrice = parseFloat(res.data[0][1]);
-            const pctChange = Math.abs((price - openPrice) / openPrice * 100);
-            if (pctChange > 2.0) conv++;
+            // Rule 5: Funding Rate Signal (Significant cost to hold)
+            if (Math.abs(fr) >= 0.0001) conv++;
 
             indicators[sym] = {
                 r: Math.round(rsi),
                 e: price > ema ? 1 : 0,
-                cv: conv
+                cv: conv,
+                oi: oi,
+                fr: fr
             };
-            await new Promise(r => setTimeout(r, 200)); // Slower stagger
+            await new Promise(r => setTimeout(r, 250)); // Slower stagger to be safe
         } catch (e) {}
     }
 };
@@ -128,8 +136,13 @@ const startTickerEngine = () => {
                     const openPrice = parseFloat(item.o);
                     const change = openPrice !== 0 ? ((rawPrice - openPrice) / openPrice * 100).toFixed(2) : "0.00";
                     const p = rawPrice >= 1000 ? rawPrice.toFixed(2) : rawPrice.toPrecision(6);
-                    const ind = indicators[sym] || { r: 50, e: 0, cv: 0 };
-                    tickerCache[sym] = { p, v: item.q, c: change, r: ind.r, e: ind.e, cv: ind.cv };
+
+                    const ind = indicators[sym] || { r: 50, e: 0, cv: 0, oi: 0, fr: 0 };
+                    tickerCache[sym] = {
+                        p, v: item.q, c: change,
+                        r: ind.r, e: ind.e, cv: ind.cv,
+                        oi: ind.oi, fr: ind.fr
+                    };
                 }
             });
         } catch (e) {}
